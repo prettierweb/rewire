@@ -7,6 +7,8 @@
   No capture card, no adapter, no extra hardware.
 </p>
 
+<p align="center">⭐ if you like this, please star it, it really helps people find it ⭐</p>
+
 <p align="center">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0c0c0f?style=for-the-badge&logo=windows&logoColor=7fa7ff">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.10+-0c0c0f?style=for-the-badge&logo=python&logoColor=3fdcb0">
@@ -23,11 +25,16 @@ on foot, one for driving. It switches between them when you get in and out of a 
 
 ## What it looks like
 
-<p align="center"><img src="docs/inspect.png" alt="Every key shows its in-game action" width="100%"></p>
+<p align="center"><img src="docs/live.png" alt="Rewire live, on foot" width="100%"></p>
 
 **Every key says what it does.** "Jump", "Run", "Get in", not "Cross" or "L3". The colour bar and corner
-symbol show the PS button underneath, in PlayStation's own colours: blue ✕, red ○, pink □, green △. Hover a
-key for the full description. While you play, the panel follows the last key you pressed.
+symbol show the PS button underneath, in PlayStation's own colours: blue ✕, red ○, pink □, green △. Keys
+light up as you press them, and the panel shows what the last one did.
+
+<p align="center"><img src="docs/driving.png" alt="Driving layout" width="100%"></p>
+
+**Get in a car and the whole keyboard changes.** W becomes gas, S brake, Space handbrake, H headlights.
+Get out and it switches back.
 
 <p align="center"><img src="docs/picker.png" alt="Rebinding picker" width="100%"></p>
 

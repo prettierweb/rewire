@@ -814,7 +814,7 @@ class App:
             self.kb.itemconfig(k["bar"], fill=col if t else BG)
             k["base"] = KEY if t else BG
             sel = name == self.editing
-            self.kb.itemconfig(k["body"], fill=KEYHI if sel else k["base"],
+            self.kb.itemconfig(k["body"], fill=KEYHI if sel or name in self.prev_down else k["base"],
                                outline=FG if sel else ("" if t else EDGE), width=2 if sel else 1)
         self.inspect(self.hover)
 
@@ -860,7 +860,8 @@ class App:
             cx, cy = W - 90, 85
             c.create_oval(cx - 46, cy - 46, cx + 46, cy + 46, outline=col, width=3)
             c.create_text(cx, cy, text=glyph, fill=col, font=(FONT, 26 if len(glyph) < 3 else 14, "bold"))
-            c.create_text(cx - 66, cy, text=ps, fill=col, font=(FONT, 10, "bold"), anchor="e")
+            if ps != glyph:
+                c.create_text(cx - 66, cy, text=ps, fill=col, font=(FONT, 10, "bold"), anchor="e")
         c.config(height=170)
 
     def paint_picker(self, W):

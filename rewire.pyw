@@ -6,7 +6,7 @@ raw mouse motion drives the right stick. Alt+Tab away = everything released.
 Two layouts (on foot / driving), GTA-style; F (enter/exit) and Caps Lock switch.
 Panic: F10, Alt+Tab, or Ctrl+Alt+Del then Esc (frees the cursor).
 """
-import ctypes, ctypes.wintypes as wt, json, math, os, struct, threading, time, traceback
+import ctypes, ctypes.wintypes as wt, json, math, os, struct, subprocess, sys, threading, time, traceback
 import tkinter as tk
 import tkinter.font as tkfont
 
@@ -127,6 +127,9 @@ def load_cfg():
         if user.get("version") == CFG_VERSION:
             if user.get("toggle_key") in VK:
                 cfg["toggle_key"] = user["toggle_key"]
+            win = user.get("window")
+            if isinstance(win, list) and len(win) == 4 and all(isinstance(v, int) for v in win):
+                cfg["window"] = win
             t = user.get("targets")
             if isinstance(t, list) and t and all(isinstance(x, str) for x in t):
                 cfg["targets"] = [x.lower() for x in t]
@@ -201,6 +204,25 @@ class RAWINPUTDEVICE(ctypes.Structure):
                 ("hwndTarget", wt.HWND)]
 
 
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT), ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+
+
+def monitors():
+    """-> list of (work_rect (l, t, r, b), is_primary) for every connected monitor."""
+    out = []
+    PROC = ctypes.WINFUNCTYPE(ctypes.c_int, wt.HMONITOR, wt.HDC, ctypes.POINTER(wt.RECT), wt.LPARAM)
+
+    def cb(hmon, hdc, rect, data):
+        mi = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
+        if u32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            w = mi.rcWork
+            out.append(((w.left, w.top, w.right, w.bottom), bool(mi.dwFlags & 1)))
+        return 1
+    u32.EnumDisplayMonitors(None, None, PROC(cb), 0)
+    return out
+
+
 def foreground_exe():
     hwnd = u32.GetForegroundWindow()
     pid = wt.DWORD()
@@ -215,11 +237,132 @@ def foreground_exe():
     return hwnd, (os.path.basename(buf.value).lower() if ok else "")
 
 
+# ---------------------------------------------------------------- real controllers
+HIDHIDE = r"C:\Program Files\Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe"
+OUR_PAD_GUID = "4c050000c4050000"   # vendor 054C / product 05C4: the virtual DS4 Rewire creates
+
+
+class Hider:
+    """While Rewire runs, HidHide hides real game controllers from every other app, so the
+    Remote Play app only sees Rewire's controller (which carries the real pad too).
+    Cloaking is switched off again when Rewire closes; unhide.bat does the same by hand."""
+
+    def __init__(self):
+        self.ok = os.path.exists(HIDHIDE)
+        self.active = False
+        self.hidden = set()
+
+    def cli(self, *args):
+        try:
+            return subprocess.run([HIDHIDE, *args], capture_output=True, text=True, timeout=10,
+                                  creationflags=0x08000000).stdout
+        except Exception:
+            return ""
+
+    def start(self):
+        if not self.ok:
+            return
+        me = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        self.scan(["--app-reg", me, "--cloak-on"])
+        self.active = True
+
+    def scan(self, extra=()):
+        args = list(extra)
+        try:
+            groups = json.loads(self.cli("--dev-gaming") or "[]")
+        except ValueError:
+            groups = []
+        for g in groups:
+            for d in g.get("devices", []):
+                path = d.get("deviceInstancePath", "")
+                # virtual pads (ours) have no physical base container: never hide those
+                if d.get("present") and d.get("gamingDevice") and d.get("baseContainerDeviceInstancePath") \
+                        and path not in self.hidden:
+                    args += ["--dev-hide", path]
+                    self.hidden.add(path)
+        if args:
+            self.cli(*args)
+
+    def stop(self):
+        if self.ok and self.active:
+            self.cli("--cloak-off")
+            self.active = False
+
+
+class RealPad(threading.Thread):
+    """Reads the first real controller (DualSense, DS4, Xbox...) so its input is merged
+    into Rewire's controller. Rumble from the game is passed back to it."""
+    BUTTONS = {0: "CROSS", 1: "CIRCLE", 2: "SQUARE", 3: "TRIANGLE", 4: "SHARE", 5: "PS", 6: "OPTIONS",
+               7: "L3", 8: "R3", 9: "L1", 10: "R1", 11: "DUP", 12: "DDOWN", 13: "DLEFT", 14: "DRIGHT",
+               20: "TOUCHPAD"}
+
+    def __init__(self, eng):
+        super().__init__(daemon=True)
+        self.eng = eng
+        self.state = None        # latest reading, replaced whole (no lock needed)
+        self.name = ""
+        self.rumble = (0, 0)
+
+    def run(self):
+        os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
+        os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
+        os.environ["SDL_JOYSTICK_HIDAPI_PS5_RUMBLE"] = "1"
+        os.environ["SDL_JOYSTICK_HIDAPI_PS4_RUMBLE"] = "1"
+        try:
+            import pygame
+            from pygame._sdl2 import controller
+            pygame.display.init(); pygame.joystick.init(); controller.init()
+        except Exception:
+            return
+        pad, next_scan, sent = None, 0.0, None
+        while self.eng.running:
+            try:
+                pygame.event.pump()
+                now = time.perf_counter()
+                if (pad is None or not pad.attached()) and now >= next_scan:
+                    pad, self.name, self.state = None, "", None
+                    next_scan = now + 1.0
+                    for i in range(pygame.joystick.get_count()):
+                        if not controller.is_controller(i):
+                            continue
+                        if OUR_PAD_GUID in pygame.joystick.Joystick(i).get_guid():
+                            continue
+                        pad = controller.Controller(i)
+                        self.name = controller.name_forindex(i) or "Controller"
+                        break
+                if pad is not None:
+                    ax = lambda a: pad.get_axis(a) / 32767.0
+                    btn = {t for b, t in self.BUTTONS.items() if pad.get_button(b)}
+                    self.state = {"lx": ax(0), "ly": -ax(1), "rx": ax(2), "ry": -ax(3),
+                                  "lt": max(0.0, ax(4)), "rt": max(0.0, ax(5)), "buttons": btn}
+                    if self.rumble != sent:
+                        lo, hi = self.rumble
+                        if lo or hi:
+                            pad.rumble(lo / 255.0, hi / 255.0, 2000)
+                        else:
+                            pad.stop_rumble()
+                        sent = self.rumble
+            except Exception:
+                pad, self.state = None, None
+            time.sleep(0.004)
+
+
 # ---------------------------------------------------------------- engine
 class Engine:
     def __init__(self, cfg):
         self.cfg = cfg
         self.pad = vg.VDS4Gamepad()
+        self.real = RealPad(self)
+        self.hider = None
+        real = self.real
+
+        def on_rumble(client, target, large_motor, small_motor, lightbar_color, user_data):
+            real.rumble = (large_motor, small_motor)   # the game's rumble goes back to the real pad
+        try:
+            self.pad.register_notification(callback_function=on_rumble)
+            self._rumble_cb = on_rumble
+        except Exception:
+            pass
         self.lock = threading.Lock()
         self.armed = False
         self.live = False          # armed and Veyra in front
@@ -336,8 +479,7 @@ class Engine:
                         elif clip is not None:
                             u32.ClipCursor(None); clip = None
                     dt = max(now - last, 1e-4); last = now
-                    if self.live:
-                        self.tick(now, dt)
+                    self.tick(now, dt)   # always: the real controller passes through even when off
                 except Exception:
                     # never keep swallowing input after an error: drop to OFF and log it
                     self.armed = False
@@ -394,6 +536,16 @@ class Engine:
             ry = -self.sy / speed * out
             if a["invert_y"]:
                 ry = -ry
+        lt = 1.0 if "L2" in targets else 0.0
+        rt = 1.0 if "R2" in targets else 0.0
+        real = self.real.state
+        if real:
+            targets |= real["buttons"]
+            if math.hypot(real["lx"], real["ly"]) > 0.08:
+                lx, ly = real["lx"], real["ly"]
+            if math.hypot(real["rx"], real["ry"]) > 0.08:
+                rx, ry = real["rx"], real["ry"]
+            lt, rt = max(lt, real["lt"]), max(rt, real["rt"])
         p = self.pad
         p.reset()
         for t in targets:
@@ -401,10 +553,10 @@ class Engine:
                 p.press_button(BTN[t])
             elif t in SPECIAL:
                 p.press_special_button(SPECIAL[t])
-        if "L2" in targets:
-            p.press_button(DS4B.DS4_BUTTON_TRIGGER_LEFT); p.left_trigger_float(1.0)
-        if "R2" in targets:
-            p.press_button(DS4B.DS4_BUTTON_TRIGGER_RIGHT); p.right_trigger_float(1.0)
+        if lt > 0.02:
+            p.press_button(DS4B.DS4_BUTTON_TRIGGER_LEFT); p.left_trigger_float(lt)
+        if rt > 0.02:
+            p.press_button(DS4B.DS4_BUTTON_TRIGGER_RIGHT); p.right_trigger_float(rt)
         hx = ("DRIGHT" in targets) - ("DLEFT" in targets)
         hy = ("DUP" in targets) - ("DDOWN" in targets)
         p.directional_pad(DPAD_DIR[(hx, hy)])
@@ -619,6 +771,7 @@ class App:
         r.configure(bg=BG)
         r.resizable(True, True)
         r.minsize(760, 620)
+        self.place_window()
         self.u = U
         self._fonts = {}
         self._redraw_job = None
@@ -640,7 +793,9 @@ class App:
             b.bind("<Button-1>", lambda e, m=m: self.pick_tab(m))
             self.tab_btns[m] = b
         self.sub = tk.Label(r, text="", bg=BG, fg=DIM, font=(FONT, 10), anchor="w")
-        self.sub.pack(fill="x", padx=30, pady=(0, 14))
+        self.sub.pack(fill="x", padx=30)
+        self.padline = tk.Label(r, text="", bg=BG, fg=MUTE, font=(FONT, 10), anchor="w")
+        self.padline.pack(fill="x", padx=30, pady=(2, 14))
 
         self.kb = tk.Canvas(r, bg=BG, highlightthickness=0, width=int(U * 15.4 + 8), height=int(U * 6.4 + 8))
         self.kb.pack(padx=28, fill="x")
@@ -694,6 +849,32 @@ class App:
         self.refresh()
 
     # -- keyboard
+    # -- window placement: never on the main (gaming) monitor by default
+    def place_window(self):
+        mons = monitors()
+        saved = self.eng.cfg.get("window")
+        if isinstance(saved, list) and len(saved) == 4:
+            x, y, w, h = (int(v) for v in saved)
+            if any(l <= x + 40 < r and t <= y + 20 < b for (l, t, r, b), _ in mons):
+                self.root.geometry(f"{w}x{h}+{x}+{y}")
+                return
+        side = [m for m in mons if not m[1]]
+        pick = min(side, key=lambda m: (m[0][2] - m[0][0]) * (m[0][3] - m[0][1])) if side else \
+            (mons[0] if mons else None)
+        if pick:
+            l, t, r, b = pick[0]
+            w, h = min(1300, r - l - 60), min(980, b - t - 60)
+            self.root.geometry(f"{w}x{h}+{l + 30}+{t + 30}")
+
+    def save_window(self):
+        try:
+            self.root.update_idletasks()
+            self.eng.cfg["window"] = [self.root.winfo_x(), self.root.winfo_y(),
+                                      self.root.winfo_width(), self.root.winfo_height()]
+            save_cfg(self.eng.cfg)
+        except Exception:
+            pass
+
     KB_ROWS = 6.4   # keyboard height in key units (mouse column is the tallest part)
 
     def on_resize(self, event=None):
@@ -986,6 +1167,13 @@ class App:
             if e.error:
                 msg = "Stopped after an error (see errors.log).   " + msg
             self.sub.config(text=msg)
+        if e.real.name:
+            hid = "  ·  hidden from other apps, so Veyra uses Rewire" if e.hider and e.hider.active else \
+                "  ·  install HidHide so Veyra stops grabbing it directly"
+            self.padline.config(text=f"🎮  {e.real.name} works alongside keys + mouse{hid}", fg=SYM["TRIANGLE"])
+        else:
+            self.padline.config(text="🎮  No controller plugged in. Plug one in any time and it just works.",
+                                fg=MUTE)
         if self.follow and self.view != e.mode:
             self.show(e.mode)
         held = set(e.down)
@@ -1006,12 +1194,23 @@ class App:
         self.root.after(33, self.refresh)
 
     def quit(self):
+        self.save_window()
         self.eng.running = False
         self.root.after(80, self.root.destroy)
 
 
 def main():
     eng = Engine(load_cfg())
+    eng.hider = Hider()
+    eng.hider.start()
+    eng.real.start()
+
+    def rescan():
+        while eng.running:
+            time.sleep(3)
+            if eng.hider.active:
+                eng.hider.scan()   # hide controllers plugged in later
+    threading.Thread(target=rescan, daemon=True).start()
     ready = []
     threading.Thread(target=input_thread, args=(eng, ready), daemon=True).start()
     out = threading.Thread(target=eng.loop, daemon=True)
@@ -1022,6 +1221,7 @@ def main():
     finally:
         eng.running = False
         out.join(timeout=1)
+        eng.hider.stop()          # give the real controller back to every app
         if ready:
             u32.PostThreadMessageW(ready[0], 0x12, 0, 0)
 

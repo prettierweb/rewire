@@ -43,6 +43,10 @@ between the on-foot and driving layouts, the way F does when you enter a car.
 
 ## Highlights
 
+- **Controller and keyboard at the same time.** Plug your DualSense (or any pad) in and Rewire merges it
+  into the same virtual controller, rumble included. Grab the pad for a cutscene, the mouse for a shootout,
+  no switching or unplugging. [HidHide](https://github.com/nefarius/HidHide) hides the real pad from other
+  apps while Rewire runs, so the Remote Play app only sees one controller, and gives it back when you close Rewire.
 - **Mouse aim that feels like a mouse.** Raw mouse input turns into stick tilt, and you can tune it live
   with an anti-deadzone, a response curve, smoothing and speed. It stops dead when your hand stops, so the
   camera doesn't drift.
@@ -71,14 +75,16 @@ Remote Play.
 
 1. **Install [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases)**, the virtual controller driver.
    It needs one admin prompt.
-2. **Install Python 3.10+**, then:
+2. **Optional, to use your controller alongside keyboard + mouse:** install
+   [HidHide](https://github.com/nefarius/HidHide/releases), then unplug and replug your controller once.
+3. **Install Python 3.10+**, then:
    ```
    pip install -r requirements.txt
    ```
-3. **Pair your PS5** with a Remote Play app. Rewire is built and tested against
+4. **Pair your PS5** with a Remote Play app. Rewire is built and tested against
    [Veyra](https://github.com/Likely7/Veyra-NRVideo). For another app, add its `.exe` name to
    `targets` in `config.json`.
-4. Run `Rewire.bat` (or `pythonw rewire.pyw`).
+5. Run `Rewire.bat`. It opens on your second monitor if you have one, and remembers where you put it. (or `pythonw rewire.pyw`).
 
 ## Playing
 
@@ -89,7 +95,8 @@ Remote Play.
 | **F / Caps Lock** | Switch between the on-foot and driving layouts |
 | **Ctrl+Alt+Del, then Esc** | Emergency: frees the cursor whatever happens |
 
-> Unplug your real controller while you play. Most Remote Play apps listen to one pad at a time.
+> Without HidHide, unplug your real controller while you play: most Remote Play apps only listen to one pad.
+> If Rewire ever crashes while hiding your controller, run `unhide.bat`.
 >
 > If your Remote Play app has its own shortcuts on Space, F or Tab (Veyra does), move them to
 > Ctrl+key in its settings. Otherwise they fire while Rewire is off.

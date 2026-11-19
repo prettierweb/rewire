@@ -642,9 +642,9 @@ class App:
         self.sub = tk.Label(r, text="", bg=BG, fg=DIM, font=(FONT, 10), anchor="w")
         self.sub.pack(fill="x", padx=30, pady=(0, 14))
 
-        self.kb = tk.Canvas(r, bg=BG, highlightthickness=0, width=int(U * 15.4 + 8), height=int(U * 6 + 8))
+        self.kb = tk.Canvas(r, bg=BG, highlightthickness=0, width=int(U * 15.4 + 8), height=int(U * 6.4 + 8))
         self.kb.pack(padx=28, fill="x")
-        self.kb.bind("<Configure>", self.on_resize)
+        r.bind("<Configure>", self.on_resize)
         self.keys = {}
         self.draw_keyboard()
 
@@ -694,23 +694,43 @@ class App:
         self.refresh()
 
     # -- keyboard
-    def on_resize(self, event):
-        u = max(40.0, min(96.0, (event.width - 8) / 15.4))
-        if abs(u - self.u) < 1.5:
+    KB_ROWS = 6.4   # keyboard height in key units (mouse column is the tallest part)
+
+    def on_resize(self, event=None):
+        if event is not None and event.widget is not self.root:
             return
-        self.u = u
         if self._redraw_job:
             self.root.after_cancel(self._redraw_job)
-        self._redraw_job = self.root.after(60, self.redraw)
+        self._redraw_job = self.root.after(50, self.relayout)
+
+    def relayout(self):
+        self._redraw_job = None
+        r = self.root
+        other = r.winfo_reqheight() - self.kb.winfo_reqheight()   # everything that is not the keyboard
+        by_w = (r.winfo_width() - 56 - 8) / 15.4
+        by_h = (r.winfo_height() - other - 8) / self.KB_ROWS
+        u = max(34.0, min(96.0, by_w, by_h))
+        if abs(u - self.u) < 1.5:
+            self.center()
+            return
+        self.u = u
+        self.redraw()
 
     def redraw(self):
-        self._redraw_job = None
         self.kb.delete("all")
         self.keys = {}
-        self.kb.config(height=int(self.u * 6 + 8))
+        self.kb.config(height=int(self.u * self.KB_ROWS + 8))
         self.draw_keyboard()
+        self.center()
         self.prev_down = set()
         self.show(self.view, self.follow)
+
+    def center(self):
+        box = self.kb.bbox("all")
+        if box:
+            dx = (self.kb.winfo_width() - (box[2] - box[0])) / 2 - box[0]
+            if abs(dx) > 1:
+                self.kb.move("all", dx, 0)
 
     def font(self, size, bold=True):
         key = (size, bold)

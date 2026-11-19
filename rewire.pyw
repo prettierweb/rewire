@@ -87,7 +87,7 @@ DEFAULTS = {
     "targets": ["veyra_qml_ui.exe"],
     "layouts": {"foot": FOOT, "drive": DRIVE},
     "aim": {"sensitivity": 1.0, "anti_deadzone": 0.22, "curve": 0.8,
-            "smoothing": 0.45, "invert_y": False},
+            "smoothing": 0.25, "invert_y": False},
 }
 
 DS4B, DS4S, DPAD = vg.DS4_BUTTONS, vg.DS4_SPECIAL_BUTTONS, vg.DS4_DPAD_DIRECTIONS
@@ -541,9 +541,11 @@ class Engine:
         real = self.real.state
         if real:
             targets |= real["buttons"]
-            if math.hypot(real["lx"], real["ly"]) > 0.08:
+            # keyboard + mouse always win; the pad's sticks only count when they're idle
+            # (a resting thumb or worn stick must never fight WASD or the mouse)
+            if lx == 0 and ly == 0 and math.hypot(real["lx"], real["ly"]) > 0.15:
                 lx, ly = real["lx"], real["ly"]
-            if math.hypot(real["rx"], real["ry"]) > 0.08:
+            if rx == 0 and ry == 0 and math.hypot(real["rx"], real["ry"]) > 0.15:
                 rx, ry = real["rx"], real["ry"]
             lt, rt = max(lt, real["lt"]), max(rt, real["rt"])
         p = self.pad

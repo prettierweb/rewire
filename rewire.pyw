@@ -86,8 +86,9 @@ DEFAULTS = {
     # Remote Play apps Rewire drives. Add yours (e.g. chiaki-ng) by its .exe name.
     "targets": ["veyra_qml_ui.exe"],
     "layouts": {"foot": FOOT, "drive": DRIVE},
+    # window_ms = one game frame: 16 for a 60 fps game, 33 for 30 fps
     "aim": {"sensitivity": 1.0, "anti_deadzone": 0.22, "curve": 0.8,
-            "smoothing": 0.25, "invert_y": False},
+            "window_ms": 16.0, "invert_y": False},
 }
 
 DS4B, DS4S, DPAD = vg.DS4_BUTTONS, vg.DS4_SPECIAL_BUTTONS, vg.DS4_DPAD_DIRECTIONS
@@ -223,6 +224,21 @@ def monitors():
     return out
 
 
+def hide_point(hwnd, r):
+    """Where to pin the cursor so it can't be seen: on a screen edge with no monitor beyond it,
+    the arrow hangs off the screen. Falls back to the window's middle."""
+    u32.MonitorFromWindow.restype = wt.HMONITOR; u32.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
+    u32.MonitorFromPoint.restype = wt.HMONITOR; u32.MonitorFromPoint.argtypes = [wt.POINT, wt.DWORD]
+    mi = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
+    if u32.GetMonitorInfoW(u32.MonitorFromWindow(hwnd, 2), ctypes.byref(mi)):
+        m = mi.rcMonitor
+        mx, my = (m.left + m.right) // 2, (m.top + m.bottom) // 2
+        for x, y, ox, oy in ((mx, m.bottom - 1, 0, 8), (m.right - 1, my, 8, 0)):
+            if not u32.MonitorFromPoint(wt.POINT(x + ox, y + oy), 0):
+                return x, y
+    return (r.left + r.right) // 2, (r.top + r.bottom) // 2
+
+
 def foreground_exe():
     hwnd = u32.GetForegroundWindow()
     pid = wt.DWORD()
@@ -347,6 +363,79 @@ class RealPad(threading.Thread):
             time.sleep(0.004)
 
 
+# ---------------------------------------------------------------- aim
+class Aim:
+    """Mouse counts -> right stick, losing nothing.
+
+    The console reads the stick only once per game frame, so a stick that follows the
+    mouse's instant speed drops or doubles motion between reads. Here every count is
+    spread evenly over one frame-length window, and a running tally ("debt") of counts
+    received minus counts the stick has actually delivered (after the 8-bit rounding,
+    the deadzone and the full-tilt limit) is fed back in, so the turn always adds up
+    to the hand movement.
+    """
+    CATCHUP = 0.030     # s to work off the tally
+    MAX_LAG = 0.050     # most over-run kept after a flick faster than full tilt, in s of full tilt
+    IDLE = 0.060        # mouse still this long past the window: drop what's left, no creep
+
+    def __init__(self):
+        self.ev = []            # (t, dx, dy) inside the window
+        self.debt_x = self.debt_y = 0.0
+        self.last = 0.0
+
+    def reset(self):
+        self.ev.clear()
+        self.debt_x = self.debt_y = 0.0
+
+    def feed(self, t, dx, dy):
+        self.ev.append((t, dx, dy))
+        self.debt_x += dx
+        self.debt_y += dy
+        self.last = t
+
+    def step(self, now, dt, a):
+        """Returns the stick as two bytes offsets (-127..127), x right, y down (mouse sense)."""
+        win = min(max(a["window_ms"], 2.0), 60.0) / 1000.0
+        ev = self.ev
+        i = 0
+        while i < len(ev) and now - ev[i][0] >= win:
+            i += 1
+        if i:
+            del ev[:i]
+        if not ev and now - self.last > win + self.IDLE:
+            self.debt_x = self.debt_y = 0.0
+            return 0, 0
+        vx = vy = px = py = 0.0     # window speed, and counts the window still owes
+        for t, dx, dy in ev:
+            vx += dx; vy += dy
+            left = 1.0 - (now - t) / win
+            px += dx * left; py += dy * left
+        vx /= win; vy /= win
+        full = 6000.0 / max(a["sensitivity"], 0.05)   # counts/s that = full tilt
+        adz = min(max(a["anti_deadzone"], 0.0), 0.9)
+        curve = max(a["curve"], 0.2)
+        ex, ey = self.debt_x - px, self.debt_y - py   # what the window won't cover by itself
+        cap = full * self.MAX_LAG
+        e = math.hypot(ex, ey)
+        if e > cap:
+            self.debt_x -= ex * (1 - cap / e); self.debt_y -= ey * (1 - cap / e)
+            ex *= cap / e; ey *= cap / e
+        tx, ty = vx + ex / self.CATCHUP, vy + ey / self.CATCHUP
+        speed = math.hypot(tx, ty)
+        if speed <= 0:
+            return 0, 0
+        out = adz + (1 - adz) * min(1.0, speed / full) ** curve
+        bx, by = round(tx / speed * out * 127), round(ty / speed * out * 127)
+        # what those two bytes really deliver, by the same curve read backwards
+        m = math.hypot(bx, by) / 127.0
+        if m > adz:
+            got = full * min(1.0, (m - adz) / (1 - adz)) ** (1.0 / curve) * dt / (m * 127.0)
+            self.debt_x -= bx * got; self.debt_y -= by * got
+        else:
+            bx = by = 0     # inside the game's deadzone it does nothing: wait and send a real step
+        return bx, by
+
+
 # ---------------------------------------------------------------- engine
 class Engine:
     def __init__(self, cfg):
@@ -371,9 +460,14 @@ class Engine:
         self.down = set()          # input names whose press we swallowed (held)
         self.pulses = {}           # wheel input -> release time
         self.toggle_down = False
-        self.dx = self.dy = 0
-        self.sx = self.sy = 0.0    # smoothed mouse velocity (counts/s)
-        self.last_motion = 0.0
+        self.aim = Aim()
+        self.seen = 0.0
+        self.steer = 0.0
+        self.eyes = False          # detect.py is up and watching the picture
+        self.eyes_hold = 0.0
+        self.eyes_proc = None
+        self.wake = threading.Event()   # input arrived: send it now, don't wait for the next tick
+        self.stat = [0, 0.0, 0.0, 0]    # mouse events, worst event->output delay, worst tick gap, ticks
         self.rs = self.ls = (0.0, 0.0)
         self.error = False
         self.running = True
@@ -389,6 +483,35 @@ class Engine:
 
     def flip_mode(self):
         self.mode = "drive" if self.mode == "foot" else "foot"
+        self.eyes_hold = time.perf_counter() + 2.5   # you said so: the eyes wait for the animation
+
+    def watch(self):
+        """Reads detect.py's verdicts and switches on foot / driving by itself."""
+        try:
+            exe = os.path.join(os.path.dirname(sys.executable), "python.exe")
+            proc = subprocess.Popen([exe, os.path.join(HERE, "detect.py"), "--live", *self.cfg["targets"]],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                    creationflags=0x08000000 | 0x00004000)   # no window, below-normal priority
+        except OSError:
+            return
+        self.eyes_proc = proc
+        run = 0; last = None
+        for line in proc.stdout:
+            if not self.running:
+                break
+            parts = line.split()
+            if parts and parts[0] == "ready":
+                self.eyes = True
+                continue
+            if len(parts) != 2 or parts[0] not in ("drive", "foot"):
+                continue
+            want, conf = parts[0], float(parts[1])
+            run = run + 1 if want == last and conf >= 0.62 else (1 if conf >= 0.62 else 0)
+            last = want
+            if run >= 3 and want != self.mode and self.live and time.perf_counter() >= self.eyes_hold:
+                with self.lock:
+                    self.mode = want
+        self.eyes = False
 
     # -- hook thread. Only swallow an "up" whose "down" we swallowed,
     # so nothing is ever left half-pressed in Veyra or Windows.
@@ -406,9 +529,11 @@ class Engine:
                     self.down.add(name)
                     if "MODE" in self.layout().get(name, ()):
                         self.flip_mode()
+                self.wake.set()
                 return True
             if name in self.down:
                 self.down.discard(name)
+                self.wake.set()
                 return True
         return False
 
@@ -437,15 +562,15 @@ class Engine:
     def on_raw(self, dx, dy):
         with self.lock:
             if self.live:
-                self.dx += dx
-                self.dy += dy
-                self.last_motion = time.perf_counter()
+                self.aim.feed(time.perf_counter(), dx, dy)
+                self.stat[0] += 1
+        self.wake.set()
 
     # -- output loop
     def release_all(self):
         with self.lock:
             self.down.clear(); self.pulses.clear()
-            self.dx = self.dy = 0; self.sx = self.sy = 0.0
+            self.aim.reset()
         self.pad.reset(); self.pad.update()
         self.rs = self.ls = (0.0, 0.0)
 
@@ -457,6 +582,8 @@ class Engine:
 
     def loop(self):
         ctypes.windll.winmm.timeBeginPeriod(1)
+        sys.setswitchinterval(0.0005)   # the window's redraws may not hold this thread up for 5 ms
+        next_stat = time.perf_counter() + 5
         last = time.perf_counter()
         next_fg = 0.0
         clip = None
@@ -473,13 +600,22 @@ class Engine:
                             self.set_live(want)
                         if self.live:
                             r = wt.RECT(); u32.GetWindowRect(hwnd, ctypes.byref(r))
-                            cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+                            cx, cy = hide_point(hwnd, r)
                             clip = wt.RECT(cx, cy, cx + 1, cy + 1)
                             u32.ClipCursor(ctypes.byref(clip))
                         elif clip is not None:
                             u32.ClipCursor(None); clip = None
                     dt = max(now - last, 1e-4); last = now
                     self.tick(now, dt)   # always: the real controller passes through even when off
+                    if now >= next_stat:
+                        next_stat = now + 5
+                        with self.lock:
+                            ev, lag, gap, n = self.stat
+                            self.stat = [0, 0.0, 0.0, 0]
+                        if n and ev:   # only while live and the mouse moved
+                            with open(os.path.join(HERE, "timing.log"), "a", encoding="utf-8") as f:
+                                f.write(f"{time.strftime('%H:%M:%S')} mouse {ev / 5:.0f}/s  sent {n / 5:.0f}/s  "
+                                        f"worst wait {lag * 1000:.1f} ms  worst gap {gap * 1000:.1f} ms\n")
                 except Exception:
                     # never keep swallowing input after an error: drop to OFF and log it
                     self.armed = False
@@ -489,7 +625,12 @@ class Engine:
                     with open(os.path.join(HERE, "errors.log"), "a", encoding="utf-8") as f:
                         f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + traceback.format_exc())
                     self.error = True
-                time.sleep(0.002)
+                # sleep until input arrives (or 2 ms), but never spin faster than 1 kHz
+                self.wake.wait(0.002)
+                self.wake.clear()
+                spare = 0.001 - (time.perf_counter() - now)
+                if spare > 0:
+                    time.sleep(spare)
         finally:
             self.armed = False
             with self.lock:
@@ -502,8 +643,14 @@ class Engine:
     def tick(self, now, dt):
         a = self.cfg["aim"]
         with self.lock:
-            dx, dy = self.dx, self.dy
-            self.dx = self.dy = 0
+            bx, by = self.aim.step(now, dt, a) if self.live else (0, 0)
+            st = self.stat
+            if self.live:
+                st[3] += 1
+                st[2] = max(st[2], dt)
+                if self.aim.last != self.seen:    # a new mouse event: how long did it wait for us?
+                    st[1] = max(st[1], now - self.aim.last)
+                    self.seen = self.aim.last
             active = set(self.down)
             for n, t in list(self.pulses.items()):
                 if t > now:
@@ -520,22 +667,19 @@ class Engine:
         m = math.hypot(lx, ly)
         if m:
             lx, ly = lx / m, ly / m
+        if self.mode == "drive":
+            # a key is all-or-nothing; ease the wheel over so A/D steer like a thumb, not a slam
+            rate = (5.0 if lx and abs(lx) > abs(self.steer) or lx * self.steer < 0 else 9.0) * dt
+            self.steer += max(-rate, min(rate, lx - self.steer))
+            if lx and abs(self.steer) < 0.3:
+                self.steer = math.copysign(0.3, lx)    # skip the game's dead middle at once
+            lx = self.steer
+        else:
+            self.steer = 0.0
         # right stick from mouse velocity
-        k = min(max(a["smoothing"], 0.0), 0.95) ** (dt / 0.004)  # same feel at any tick rate
-        self.sx = self.sx * k + (dx / dt) * (1 - k)
-        self.sy = self.sy * k + (dy / dt) * (1 - k)
-        if dx == 0 and dy == 0 and now - self.last_motion > 0.012:
-            self.sx = self.sy = 0.0   # mouse stopped: stop turning, no drift
-        speed = math.hypot(self.sx, self.sy)
-        rx = ry = 0.0
-        if speed > 0:
-            full = 6000.0 / max(a["sensitivity"], 0.05)  # counts/s that = full tilt
-            d = min(1.0, speed / full) ** max(a["curve"], 0.2)
-            out = min(1.0, a["anti_deadzone"] + (1 - a["anti_deadzone"]) * d)
-            rx = self.sx / speed * out
-            ry = -self.sy / speed * out
-            if a["invert_y"]:
-                ry = -ry
+        if a["invert_y"]:
+            by = -by
+        rx, ry = bx / 127.0, -by / 127.0
         lt = 1.0 if "L2" in targets else 0.0
         rt = 1.0 if "R2" in targets else 0.0
         real = self.real.state
@@ -555,9 +699,9 @@ class Engine:
                 p.press_button(BTN[t])
             elif t in SPECIAL:
                 p.press_special_button(SPECIAL[t])
-        if lt > 0.02:
+        if lt > 0.08:      # a real trigger resting slightly pressed must not aim or fire
             p.press_button(DS4B.DS4_BUTTON_TRIGGER_LEFT); p.left_trigger_float(lt)
-        if rt > 0.02:
+        if rt > 0.08:
             p.press_button(DS4B.DS4_BUTTON_TRIGGER_RIGHT); p.right_trigger_float(rt)
         hx = ("DRIGHT" in targets) - ("DLEFT" in targets)
         hy = ("DUP" in targets) - ("DDOWN" in targets)
@@ -827,11 +971,12 @@ class App:
         sl = tk.Frame(bottom, bg=BG); sl.pack(side="left", fill="x", expand=True, padx=(28, 0))
         a = eng.cfg["aim"]
         self.sliders = {}
+        self.last_mode = None
         for i, (key, label, lo, hi, res) in enumerate((
                 ("sensitivity", "AIM SPEED", 0.2, 4.0, 0.05),
                 ("anti_deadzone", "ANTI-DEADZONE", 0.0, 0.45, 0.01),
                 ("curve", "CURVE  ·  LOWER = FINER SMALL MOVES", 0.4, 2.0, 0.05),
-                ("smoothing", "SMOOTHING", 0.0, 0.9, 0.05))):
+                ("window_ms", "GAME FRAME MS  ·  16 = 60 FPS, 33 = 30 FPS", 4.0, 40.0, 1.0))):
             sl.columnconfigure(i % 2, weight=1)
             w = Slider(sl, label, lo, hi, res, a[key], lambda k=key: self.set_aim(k))
             w.c.grid(row=i // 2, column=i % 2, sticky="ew", padx=(0, 26), pady=(0, 6))
@@ -965,44 +1110,70 @@ class App:
             c.create_text(x + 8, y + 6, text=cap, fill=MUTE, font=(FONT, 7, "bold"), anchor="nw")
             act = c.create_text(x + 8, y + h * 0.62, text="", fill=FG, font=(FONT, 9, "bold"), anchor="w")
             sym = c.create_text(x + w - 8, y + 6, text="", fill=FG, font=(FONT, 8, "bold"), anchor="ne")
+        act2 = c.create_text(x + 8, y + h * 0.80, text="", fill=DIM, font=(FONT, 9, "bold"), anchor="w")
         if reserved:
             c.create_text(x + 8, y + h / 2 + 2, anchor="w", fill=MUTE, font=(FONT, 8),
                           text="on / off" if name == "F10" else "Alt+Tab")
         else:
-            for item in (body, bar, act, sym):
+            for item in (body, bar, act, act2, sym):
                 c.tag_bind(item, "<Button-1>", lambda e, n=name: self.edit(n, e))
                 c.tag_bind(item, "<Enter>", lambda e, n=name: self.on_hover(n))
                 c.tag_bind(item, "<Leave>", lambda e, n=name: self.on_hover(None, n))
-        self.keys[name] = {"body": body, "bar": bar, "act": act, "sym": sym, "reserved": reserved, "w": w}
+        self.keys[name] = {"body": body, "bar": bar, "act": act, "act2": act2, "sym": sym,
+                           "reserved": reserved, "w": w, "x": x, "y": y, "h": h}
 
     def show(self, mode, follow=True):
+        """Every key shows both jobs at once: on foot above, driving below. The layout that is
+        live right now is bright, the other one dim. `mode` is only which one a click edits."""
         self.view, self.follow = mode, follow
+        live = self.eng.mode
         for m, b in self.tab_btns.items():
-            on = m == mode
-            b.config(fg=BG if on else DIM, bg=FG if on else BG)
-        lay = self.eng.cfg["layouts"][mode]
+            on = m == live
+            b.config(fg=BG if on else DIM, bg=(OK if self.eng.live else FG) if on else BG)
+        lays = self.eng.cfg["layouts"]
+        start = max(8, min(13, int(self.u / 5.6)))
         for name, k in self.keys.items():
             if k["reserved"]:
                 continue
-            t = lay.get(name, [])
-            short, _, _, col = describe(mode, t)
+            tf, td = lays["foot"].get(name, []), lays["drive"].get(name, [])
+            sf, sd = describe("foot", tf)[0], describe("drive", td)[0]
+            t = tf if live == "foot" else td
+            col = describe(live, t)[3]
             main = [x for x in t if x != "MODE"]
             glyph = TARGETS[main[0]] if main else ("⇄" if t else "")
             if main and main[0].startswith("LS_"):
                 glyph = ""
-            start = max(8, min(13, int(self.u / 5.6)))
-            self.kb.itemconfig(k["act"], text=short, fill=FG if t else MUTE,
-                               font=self.fit(short, k["w"] - 14, start))
+            x, y, x1, y1 = self.kb.bbox(k["body"])   # where the key is now (the board gets re-centred)
+            h, w = y1 - y, k["w"]
+            tx = x + (8 if h > self.u * 0.8 else 92)   # short wide mouse rows: text beside the name
+            if sf == sd:                       # same job either way: one line
+                self.kb.coords(k["act"], tx, y + h * (0.62 if tx == x + 8 else 0.45))
+                self.kb.itemconfig(k["act"], text=sf, fill=FG if t else MUTE, font=self.fit(sf, w - 14, start))
+                self.kb.itemconfig(k["act2"], text="")
+            else:
+                small = max(7, start - 2)
+                top, bot = (sf or "–"), (sd or "–")
+                self.kb.coords(k["act"], tx, y + h * (0.47 if tx == x + 8 else 0.30))
+                self.kb.coords(k["act2"], tx, y + h * (0.74 if tx == x + 8 else 0.66))
+                self.kb.itemconfig(k["act"], text=top, font=self.fit(top, w - 14, start if live == "foot" else small),
+                                   fill=(FG if tf else MUTE) if live == "foot" else DIM)
+                self.kb.itemconfig(k["act2"], text=bot, font=self.fit(bot, w - 14, start if live == "drive" else small),
+                                   fill=(FG if td else MUTE) if live == "drive" else DIM)
             self.kb.itemconfig(k["sym"], text=glyph, fill=col)
             self.kb.itemconfig(k["bar"], fill=col if t else BG)
-            k["base"] = KEY if t else BG
+            k["base"] = KEY if (tf or td) else BG
             sel = name == self.editing
             self.kb.itemconfig(k["body"], fill=KEYHI if sel or name in self.prev_down else k["base"],
-                               outline=FG if sel else ("" if t else EDGE), width=2 if sel else 1)
+                               outline=FG if sel else ("" if (tf or td) else EDGE), width=2 if sel else 1)
         self.inspect(self.hover)
 
     def pick_tab(self, m):
-        self.show(m, follow=(m == self.eng.mode))
+        with self.eng.lock:
+            self.eng.mode = m
+        self.show(m)
+
+    def pick_edit(self, m):
+        self.show(m, follow=False)
 
     def on_hover(self, name, leaving=None):
         if name is None and leaving != self.hover:
@@ -1029,22 +1200,20 @@ class App:
                           fill=DIM, font=(FONT, 11), anchor="w")
             c.config(height=170)
             return
-        t = self.eng.cfg["layouts"][self.view].get(name, [])
-        short, long, ps, col = describe(self.view, t)
-        where = "ON FOOT" if self.view == "foot" else "DRIVING"
-        c.create_text(26, 30, text=f"{SHORT.get(name, name).upper()}   ·   {where}", fill=DIM,
-                      font=(FONT, 9, "bold"), anchor="w")
-        c.create_text(24, 82, text=short or "Nothing", fill=FG if t else MUTE, font=(FONT, 30, "bold"),
-                      anchor="w")
-        c.create_text(26, 132, text=long, fill=DIM, font=(FONT, 11), anchor="w")
-        if t:
-            main = [x for x in t if x != "MODE"]
-            glyph = TARGETS[main[0]] if main else "⇄"
-            cx, cy = W - 90, 85
-            c.create_oval(cx - 46, cy - 46, cx + 46, cy + 46, outline=col, width=3)
-            c.create_text(cx, cy, text=glyph, fill=col, font=(FONT, 26 if len(glyph) < 3 else 14, "bold"))
-            if ps != glyph:
-                c.create_text(cx - 66, cy, text=ps, fill=col, font=(FONT, 10, "bold"), anchor="e")
+        c.create_text(26, 26, text=SHORT.get(name, name).upper(), fill=DIM, font=(FONT, 9, "bold"), anchor="w")
+        half = (W - 52) / 2
+        for i, (m, where) in enumerate((("foot", "ON FOOT"), ("drive", "DRIVING"))):
+            t = self.eng.cfg["layouts"][m].get(name, [])
+            short, long, ps, col = describe(m, t)
+            on = m == self.eng.mode
+            x = 26 + i * half
+            c.create_text(x, 52, text=where + ("   ·   NOW" if on else ""), fill=OK if on else MUTE,
+                          font=(FONT, 9, "bold"), anchor="w")
+            c.create_text(x - 2, 92, text=short or "Nothing", fill=(FG if on else DIM) if t else MUTE,
+                          font=self.fit(short or "Nothing", half - 30, 28), anchor="w")
+            c.create_text(x, 128, text=long, fill=DIM, font=(FONT, 10), anchor="w")
+            if t:
+                c.create_text(x, 150, text=ps, fill=col, font=(FONT, 9, "bold"), anchor="w")
         c.config(height=170)
 
     def paint_picker(self, W):
@@ -1054,8 +1223,15 @@ class App:
         where = "ON FOOT" if mode == "foot" else "DRIVING"
         c.create_text(26, 28, text=f"{SHORT.get(name, name).upper()}  DOES …", fill=FG,
                       font=(FONT, 13, "bold"), anchor="w")
-        c.create_text(26 + self.font(13).measure(f"{SHORT.get(name, name).upper()}  DOES …") + 14, 29,
-                      text=where, fill=MUTE, font=(FONT, 9, "bold"), anchor="w")
+        px = 26 + self.font(13).measure(f"{SHORT.get(name, name).upper()}  DOES …") + 18
+        for m, lab in (("foot", "ON FOOT"), ("drive", "WHEN DRIVING")):
+            on = m == mode
+            pw = self.font(9).measure(lab) + 24
+            b = rrect(c, px, 15, px + pw, 41, 13, fill=FG if on else PANEL, outline="" if on else EDGE)
+            tx = c.create_text(px + pw / 2, 28, text=lab, fill=BG if on else DIM, font=(FONT, 9, "bold"))
+            for it in (b, tx):
+                c.tag_bind(it, "<Button-1>", lambda e, m=m: self.pick_edit(m))
+            px += pw + 8
         cols = max(4, int((W - 40 + 10) // 158))
         cw, ch, gap = (W - 40 - (cols - 1) * 10) / cols, 50, 10
         y0 = 52
@@ -1114,7 +1290,7 @@ class App:
         if self.editing:
             self.editing = None
             self.sync_bottom()
-            self.show(self.view, self.follow)
+            self.show(self.eng.mode)
 
     def _save_layout(self):
         save_cfg(self.eng.cfg)
@@ -1159,7 +1335,8 @@ class App:
         if e.live:
             self.state.config(text="LIVE", fg=OK)
             self.sub.config(text=f"Keys and mouse are driving the PS5.   {tk_} or Alt+Tab to stop.   "
-                                 "F and Caps Lock switch on foot / driving.")
+                                 + ("On foot / driving switches by itself." if e.eyes else
+                                    "F and Caps Lock switch on foot / driving."))
         elif e.armed:
             self.state.config(text="ARMED", fg=ACC)
             self.sub.config(text="Click into Veyra's window to go live.")
@@ -1176,8 +1353,9 @@ class App:
         else:
             self.padline.config(text="🎮  No controller plugged in. Plug one in any time and it just works.",
                                 fg=MUTE)
-        if self.follow and self.view != e.mode:
-            self.show(e.mode)
+        if (e.mode, e.live) != self.last_mode:
+            self.last_mode = (e.mode, e.live)
+            self.show(self.view if self.editing else e.mode)
         held = set(e.down)
         new = held - self.prev_down
         if new:
@@ -1217,12 +1395,16 @@ def main():
     threading.Thread(target=input_thread, args=(eng, ready), daemon=True).start()
     out = threading.Thread(target=eng.loop, daemon=True)
     out.start()
+    if eng.cfg.get("auto_switch"):   # off: the picture-watcher guessed wrong too often (walking on a road = "driving")
+        threading.Thread(target=eng.watch, daemon=True).start()
     app = App(eng)
     try:
         app.root.mainloop()
     finally:
         eng.running = False
         out.join(timeout=1)
+        if eng.eyes_proc:
+            eng.eyes_proc.kill()
         eng.hider.stop()          # give the real controller back to every app
         if ready:
             u32.PostThreadMessageW(ready[0], 0x12, 0, 0)

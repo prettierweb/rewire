@@ -67,6 +67,8 @@ FOOT = {
 }
 DRIVE = {
     "W": ["R2"], "S": ["L2"], "A": ["LS_LEFT"], "D": ["LS_RIGHT"],
+    "LCtrl": ["LS_DOWN"],      # lean back: W + Ctrl = wheelie (GTA V PC)
+    "X": ["LS_UP"],            # lean forward
     "Space": ["CROSS"],        # handbrake
     "F": ["TRIANGLE", "MODE"], # exit vehicle -> on-foot layout
     "E": ["L3"], "LShift": ["L3"],  # horn / nitrous
@@ -87,8 +89,8 @@ DEFAULTS = {
     "targets": ["veyra_qml_ui.exe"],
     "layouts": {"foot": FOOT, "drive": DRIVE},
     # window_ms = one game frame: 16 for a 60 fps game, 33 for 30 fps
-    "aim": {"sensitivity": 1.0, "anti_deadzone": 0.22, "curve": 0.8,
-            "window_ms": 16.0, "invert_y": False},
+    "aim": {"sensitivity": 1.0, "anti_deadzone": 0.34, "curve": 1.0,
+            "window_ms": 16.0, "ramp_ms": 650.0, "invert_y": False},
 }
 
 DS4B, DS4S, DPAD = vg.DS4_BUTTONS, vg.DS4_SPECIAL_BUTTONS, vg.DS4_DPAD_DIRECTIONS
@@ -364,28 +366,34 @@ class RealPad(threading.Thread):
 
 
 # ---------------------------------------------------------------- aim
+GAME_EXP = 1.8   # GTA 6's stick response, measured with the F9 test (2026-11-19)
+
+
 class Aim:
     """Mouse counts -> right stick, losing nothing.
 
-    The console reads the stick only once per game frame, so a stick that follows the
-    mouse's instant speed drops or doubles motion between reads. Here every count is
-    spread evenly over one frame-length window, and a running tally ("debt") of counts
-    received minus counts the stick has actually delivered (after the 8-bit rounding,
-    the deadzone and the full-tilt limit) is fed back in, so the turn always adds up
-    to the hand movement.
+    The console reads the stick once per game frame, so every count is spread evenly over one
+    frame-length window. A running tally ("debt") of counts received minus counts the camera has
+    really turned is fed back in, so the turn adds up to the hand movement.
+
+    GTA 6 also ramps the camera up to speed over ~0.65 s whatever the settings say (F9 test).
+    `w` is Rewire's model of how fast the camera is really turning right now: the stick goes
+    to full tilt at the start of a move so the ramp climbs as fast as it can, settles on the
+    tilt for the wanted speed once the camera gets there, and only what `w` really turned is
+    taken off the tally.
     """
     CATCHUP = 0.030     # s to work off the tally
-    MAX_LAG = 0.050     # most over-run kept after a flick faster than full tilt, in s of full tilt
-    IDLE = 0.060        # mouse still this long past the window: drop what's left, no creep
 
     def __init__(self):
         self.ev = []            # (t, dx, dy) inside the window
         self.debt_x = self.debt_y = 0.0
+        self.wx = self.wy = 0.0  # modelled camera speed, counts/s
         self.last = 0.0
 
     def reset(self):
         self.ev.clear()
         self.debt_x = self.debt_y = 0.0
+        self.wx = self.wy = 0.0
 
     def feed(self, t, dx, dy):
         self.ev.append((t, dx, dy))
@@ -396,14 +404,17 @@ class Aim:
     def step(self, now, dt, a):
         """Returns the stick as two bytes offsets (-127..127), x right, y down (mouse sense)."""
         win = min(max(a["window_ms"], 2.0), 60.0) / 1000.0
+        ramp = max(a.get("ramp_ms", 0.0), 0.0) / 1000.0
+        max_lag = 0.15 if ramp else 0.05     # how far behind the camera may fall before the rest is dropped
+        idle = 0.15 if ramp else 0.06        # how long it may keep catching up after the mouse stops
         ev = self.ev
         i = 0
         while i < len(ev) and now - ev[i][0] >= win:
             i += 1
         if i:
             del ev[:i]
-        if not ev and now - self.last > win + self.IDLE:
-            self.debt_x = self.debt_y = 0.0
+        if not ev and now - self.last > win + idle:
+            self.debt_x = self.debt_y = self.wx = self.wy = 0.0
             return 0, 0
         vx = vy = px = py = 0.0     # window speed, and counts the window still owes
         for t, dx, dy in ev:
@@ -415,7 +426,7 @@ class Aim:
         adz = min(max(a["anti_deadzone"], 0.0), 0.9)
         curve = max(a["curve"], 0.2)
         ex, ey = self.debt_x - px, self.debt_y - py   # what the window won't cover by itself
-        cap = full * self.MAX_LAG
+        cap = full * max_lag
         e = math.hypot(ex, ey)
         if e > cap:
             self.debt_x -= ex * (1 - cap / e); self.debt_y -= ey * (1 - cap / e)
@@ -423,16 +434,31 @@ class Aim:
         tx, ty = vx + ex / self.CATCHUP, vy + ey / self.CATCHUP
         speed = math.hypot(tx, ty)
         if speed <= 0:
+            self.wx = self.wy = 0.0
             return 0, 0
-        out = adz + (1 - adz) * min(1.0, speed / full) ** curve
+        # GTA 6 turns at speed ~ ((tilt - deadzone) / (1 - deadzone)) ** GAME_EXP (measured with F9),
+        # so take the GAME_EXP root: then mouse speed -> camera speed is straight (curve 1 = linear)
+        want = min(1.0, speed / full)
+        out = adz + (1 - adz) * (want ** curve) ** (1.0 / GAME_EXP)
+        w_along = (self.wx * tx + self.wy * ty) / speed          # camera speed in the wanted direction
+        if ramp and w_along < 0.97 * min(speed, full):
+            out = 1.0                                            # still ramping: full tilt climbs fastest
         bx, by = round(tx / speed * out * 127), round(ty / speed * out * 127)
-        # what those two bytes really deliver, by the same curve read backwards
         m = math.hypot(bx, by) / 127.0
-        if m > adz:
-            got = full * min(1.0, (m - adz) / (1 - adz)) ** (1.0 / curve) * dt / (m * 127.0)
-            self.debt_x -= bx * got; self.debt_y -= by * got
-        else:
-            bx = by = 0     # inside the game's deadzone it does nothing: wait and send a real step
+        if m <= adz:
+            self.wx = self.wy = 0.0
+            return 0, 0     # inside the game's deadzone it does nothing: wait and send a real step
+        # the speed this tilt asks the game for (counts/s), and how the game gets there
+        vt = full * (min(1.0, (m - adz) / (1 - adz)) ** GAME_EXP) ** (1.0 / curve)
+        gx, gy = bx / (m * 127.0) * vt, by / (m * 127.0) * vt
+        if ramp and vt > math.hypot(self.wx, self.wy):
+            dxw, dyw = gx - self.wx, gy - self.wy
+            d = math.hypot(dxw, dyw)
+            stepw = vt / ramp * dt
+            if d > stepw:
+                gx, gy = self.wx + dxw / d * stepw, self.wy + dyw / d * stepw
+        self.wx, self.wy = gx, gy                                # slowing down is instant in the game
+        self.debt_x -= gx * dt; self.debt_y -= gy * dt
         return bx, by
 
 
@@ -466,6 +492,12 @@ class Engine:
         self.eyes = False          # detect.py is up and watching the picture
         self.eyes_hold = 0.0
         self.eyes_proc = None
+        self.hwnd = None
+        self.out = frozenset()
+        self.calib = None          # F9 test pattern: [(start, end, stick x)]
+        self.swipe = None          # F8 swipe test: [(start, end, counts/s, ramp_ms)]
+        self.puppet = None         # puppet.json: inputs Claude holds until a set time
+        self.macro = None          # F7 first-person trick: [(start, end, button)]     # PS buttons pressed right now (for the controller drawing)
         self.wake = threading.Event()   # input arrived: send it now, don't wait for the next tick
         self.stat = [0, 0.0, 0.0, 0]    # mouse events, worst event->output delay, worst tick gap, ticks
         self.rs = self.ls = (0.0, 0.0)
@@ -484,6 +516,46 @@ class Engine:
     def flip_mode(self):
         self.mode = "drive" if self.mode == "foot" else "foot"
         self.eyes_hold = time.perf_counter() + 2.5   # you said so: the eyes wait for the animation
+
+    def watch_puppet(self):
+        path, seen = os.path.join(HERE, "puppet.json"), 0.0
+        while self.running:
+            time.sleep(0.02)
+            try:
+                m = os.path.getmtime(path)
+                if m != seen:
+                    seen = m
+                    with open(path, encoding="utf-8") as f:
+                        self.puppet = json.load(f)
+                    self.wake.set()
+            except (OSError, ValueError):
+                pass
+
+    def watch_card(self):
+        """Getting in: GTA shows the vehicle's name above the minimap. See it -> driving layout.
+        Getting out is the F key itself. So nobody has to switch by hand."""
+        try:
+            import eyes
+        except Exception:
+            return
+        if eyes.np is None:
+            return
+        self.eyes = True
+        seen = 0
+        while self.running:
+            time.sleep(0.2)
+            hwnd = self.hwnd
+            if not (self.live and hwnd):
+                seen = 0
+                continue
+            try:
+                a = eyes.card_region(hwnd)
+                seen = seen + 1 if a is not None and eyes.has_card(a)[0] else 0
+            except Exception:
+                seen = 0
+            if seen == 2 and self.mode != "drive" and time.perf_counter() >= self.eyes_hold:
+                with self.lock:
+                    self.mode = "drive"
 
     def watch(self):
         """Reads detect.py's verdicts and switches on foot / driving by itself."""
@@ -527,7 +599,8 @@ class Engine:
                     return True
                 if name not in self.down:
                     self.down.add(name)
-                    if "MODE" in self.layout().get(name, ()):
+                    t = self.layout().get(name, ())
+                    if "MODE" in t and (self.mode == "drive" or not self.eyes or len(t) == 1):
                         self.flip_mode()
                 self.wake.set()
                 return True
@@ -537,6 +610,50 @@ class Engine:
                 return True
         return False
 
+    def start_first_person(self):
+        """The GTA 6 first-person glitch, typed for you: phone up, then put it away with Circle
+        while spamming the touchpad (set to Camera in Settings > Controller). Press again if the
+        view changed when the phone closed: that means it missed."""
+        now = time.perf_counter()
+        steps = [(now, now + 0.15, "DUP")]          # phone up
+        c = now + 1.0
+        steps.append((c, c + 0.08, "CIRCLE"))       # put it away...
+        t = c + 0.09                                # ...THEN spam the touchpad (Camera); a press while
+        while t < c + 1.4:                          # the phone is still up does something else
+            steps.append((t, t + 0.05, "TOUCHPAD")); t += 0.1
+        self.macro = steps
+        self.wake.set()
+
+    def start_swipe(self):
+        """The same mouse movement at three speeds, each with the ramp fix off then on, left then
+        right. If the fix works, every swipe turns the camera the same amount."""
+        full = 6000.0 / max(self.cfg["aim"]["sensitivity"], 0.05)
+        counts = 0.32 * full                 # one swipe = 0.32 s of full tilt worth of turn
+        t = time.perf_counter() + 1.0
+        steps = []
+        for dur in (0.4, 0.8, 1.6):
+            for ramp in (0.0, 650.0):
+                for sign in (1, -1):
+                    steps.append((t, t + dur, sign * counts / dur, ramp)); t += dur + 1.3
+        self.swipe = steps
+        with open(os.path.join(HERE, "calib.log"), "a", encoding="utf-8") as f:
+            off = time.time() - time.perf_counter()
+            f.write("swipe\n" + "".join(f"{a + off:.4f} {b + off:.4f} {v:+.1f} {r:.0f}\n" for a, b, v, r in steps))
+
+    def start_calib(self):
+        """Holds the right stick at known tilts, left then right so you end up facing the same way,
+        and writes when each one started. A frame grabber records the camera; together they show
+        the game's deadzone, its speed for each tilt, and how long it takes to speed up."""
+        t = time.perf_counter() + 1.0
+        steps = []
+        for d in (0.12, 0.18, 0.24, 0.30, 0.36, 0.45, 0.55, 0.70, 0.85, 1.0):
+            for sign in (1, -1):
+                steps.append((t, t + 0.9, sign * d)); t += 1.5
+        self.calib = steps
+        with open(os.path.join(HERE, "calib.log"), "a", encoding="utf-8") as f:
+            off = time.time() - time.perf_counter()
+            f.write("start\n" + "".join(f"{a + off:.4f} {b + off:.4f} {d:+.2f}\n" for a, b, d in steps))
+
     def on_key(self, vk, down, alt):
         if vk == self.toggle_vk:
             if not (self.armed or self.veyra_front):
@@ -544,6 +661,18 @@ class Engine:
             if down and not self.toggle_down:
                 self.armed = not self.armed
             self.toggle_down = down
+            return True
+        if vk == 0x76 and self.live:  # F7: the first-person trick (in the driver's seat)
+            if down and not self.macro:
+                self.start_first_person()
+            return True
+        if vk == 0x77 and self.live:  # F8: swipe test (stand still, hands off, ~30 s)
+            if down and not self.swipe:
+                self.start_swipe()
+            return True
+        if vk == 0x78 and self.live:  # F9: measure how the game turns the camera (stand still, don't touch)
+            if down and not self.calib:
+                self.start_calib()
             return True
         if alt and down:
             return False              # keep Alt+Tab / Alt+F4 working
@@ -595,6 +724,7 @@ class Engine:
                         next_fg = now + 0.05
                         hwnd, exe = foreground_exe()
                         self.veyra_front = exe in self.cfg["targets"]
+                        self.hwnd = hwnd if self.veyra_front else None
                         want = self.armed and self.veyra_front
                         if want != self.live:
                             self.set_live(want)
@@ -643,6 +773,15 @@ class Engine:
     def tick(self, now, dt):
         a = self.cfg["aim"]
         with self.lock:
+            if self.swipe and self.live:
+                a = dict(a)
+                for s0, s1, cps, rmp in self.swipe:
+                    if s0 <= now < s1:
+                        self.aim.feed(now, cps * dt, 0.0)
+                    if s0 <= now < s1 + 1.0:
+                        a["ramp_ms"] = rmp
+                if now > self.swipe[-1][1] + 1.2:
+                    self.swipe = None
             bx, by = self.aim.step(now, dt, a) if self.live else (0, 0)
             st = self.stat
             if self.live:
@@ -680,8 +819,29 @@ class Engine:
         if a["invert_y"]:
             by = -by
         rx, ry = bx / 127.0, -by / 127.0
+        if self.calib:
+            rx = ry = 0.0
+            for a0, a1, d in self.calib:
+                if a0 <= now < a1:
+                    rx = d
+            if now > self.calib[-1][1] + 0.5:
+                self.calib = None
         lt = 1.0 if "L2" in targets else 0.0
         rt = 1.0 if "R2" in targets else 0.0
+        if self.macro:
+            for a0, a1, b in self.macro:
+                if a0 <= now < a1:
+                    targets.add(b)
+            if now > self.macro[-1][1]:
+                self.macro = None
+        pup = self.puppet
+        if pup and time.time() < pup.get("until", 0):
+            targets |= set(pup.get("buttons", ())) & (set(BTN) | set(SPECIAL) | {"DUP", "DDOWN", "DLEFT", "DRIGHT"})
+            if lx == 0 and ly == 0:
+                lx, ly = float(pup.get("lx", 0)), float(pup.get("ly", 0))
+            if rx == 0 and ry == 0:
+                rx, ry = float(pup.get("rx", 0)), float(pup.get("ry", 0))
+            lt, rt = max(lt, float(pup.get("lt", 0))), max(rt, float(pup.get("rt", 0)))
         real = self.real.state
         if real:
             targets |= real["buttons"]
@@ -710,6 +870,12 @@ class Engine:
         p.right_joystick_float(rx, -ry)
         p.update()
         self.ls, self.rs = (lx, ly), (rx, ry)
+        out = set(targets)
+        if lt > 0.08: out.add("L2")
+        if rt > 0.08: out.add("R2")
+        for name, on in (("LS_UP", ly > 0.3), ("LS_DOWN", ly < -0.3), ("LS_LEFT", lx < -0.3), ("LS_RIGHT", lx > 0.3)):
+            if on: out.add(name)
+        self.out = frozenset(out)
 
 
 # ---------------------------------------------------------------- input thread
@@ -879,14 +1045,15 @@ class Slider:
     def __init__(self, parent, label, lo, hi, res, value, on_change):
         self.label, self.lo, self.hi, self.res = label, lo, hi, res
         self.value, self.on_change = value, on_change
-        self.c = tk.Canvas(parent, bg=BG, highlightthickness=0, height=46, cursor="hand2")
+        self.c = tk.Canvas(parent, bg=BG, highlightthickness=0, height=46 * Slider.app.s, cursor="hand2")
         self.c.bind("<Configure>", lambda e: self.draw())
         self.c.bind("<Button-1>", self.drag)
         self.c.bind("<B1-Motion>", self.drag)
 
     def drag(self, e):
-        w = max(self.c.winfo_width() - 60, 10)
-        f = min(1.0, max(0.0, (e.x - 8) / w))
+        z = Slider.app.s
+        w = max(self.c.winfo_width() - 60 * z, 10)
+        f = min(1.0, max(0.0, (e.x - 8 * z) / w))
         v = self.lo + f * (self.hi - self.lo)
         v = round(round(v / self.res) * self.res, 3)
         if v != self.value:
@@ -897,15 +1064,17 @@ class Slider:
     def draw(self):
         c = self.c
         c.delete("all")
-        w = max(c.winfo_width() - 60, 10)
+        z = Slider.app.s
+        c.config(height=46 * z)
+        w = max(c.winfo_width() - 60 * z, 10)
         f = (self.value - self.lo) / (self.hi - self.lo)
-        y = 32
-        c.create_text(0, 9, text=self.label, fill=MUTE, font=(FONT, 8, "bold"), anchor="w")
-        c.create_line(8, y, 8 + w, y, fill=KEY, width=4, capstyle="round")
-        c.create_line(8, y, 8 + w * f, y, fill=ACC, width=4, capstyle="round")
-        x = 8 + w * f
-        c.create_oval(x - 7, y - 7, x + 7, y + 7, fill=FG, outline="")
-        c.create_text(c.winfo_width() - 2, y, text=f"{self.value:g}", fill=DIM, font=(FONT, 10, "bold"),
+        y = 32 * z
+        c.create_text(0, 9 * z, text=self.label, fill=MUTE, font=Slider.app.font(8), anchor="w")
+        c.create_line(8 * z, y, 8 * z + w, y, fill=KEY, width=max(2, 4 * z), capstyle="round")
+        c.create_line(8 * z, y, 8 * z + w * f, y, fill=ACC, width=max(2, 4 * z), capstyle="round")
+        x = 8 * z + w * f
+        c.create_oval(x - 7 * z, y - 7 * z, x + 7 * z, y + 7 * z, fill=FG, outline="")
+        c.create_text(c.winfo_width() - 2, y, text=f"{self.value:g}", fill=DIM, font=Slider.app.font(10),
                       anchor="e")
 
 
@@ -918,7 +1087,9 @@ class App:
         r.resizable(True, True)
         r.minsize(760, 620)
         self.place_window()
-        self.u = U
+        self.s = 1.0               # window scale vs the design size
+        Slider.app = self
+        self.u = self.REF_U
         self._fonts = {}
         self._redraw_job = None
         self.view = "foot"
@@ -927,56 +1098,51 @@ class App:
         self.last_press = None
         self.prev_down = set()
 
-        top = tk.Frame(r, bg=BG); top.pack(fill="x", padx=28, pady=(22, 0))
-        self.state = tk.Label(top, text="", bg=BG, fg=FG, font=(FONT, 34, "bold"), anchor="w")
+        st = self.stage = tk.Frame(r, bg=BG, width=self.REF_W, height=self.REF_H)
+        st.pack_propagate(False)
+        st.place(relx=0.5, rely=0.5, anchor="center")
+        top = tk.Frame(st, bg=BG); top.pack(fill="x", padx=28, pady=(22, 0))
+        self.state = tk.Label(top, text="", bg=BG, fg=FG, font=self.font(34), anchor="w")
         self.state.pack(side="left")
         right = tk.Frame(top, bg=BG); right.pack(side="right")
         self.tab_btns = {}
         for m, label in (("foot", "ON FOOT"), ("drive", "DRIVING")):
-            b = tk.Label(right, text=label, bg=BG, fg=DIM, font=(FONT, 11, "bold"), padx=16, pady=8,
+            b = tk.Label(right, text=label, bg=BG, fg=DIM, font=self.font(11), padx=16, pady=8,
                          cursor="hand2")
             b.pack(side="left", padx=(6, 0))
             b.bind("<Button-1>", lambda e, m=m: self.pick_tab(m))
             self.tab_btns[m] = b
-        self.sub = tk.Label(r, text="", bg=BG, fg=DIM, font=(FONT, 10), anchor="w")
+        self.sub = tk.Label(st, text="", bg=BG, fg=DIM, font=self.font(10, False), anchor="w")
         self.sub.pack(fill="x", padx=30)
-        self.padline = tk.Label(r, text="", bg=BG, fg=MUTE, font=(FONT, 10), anchor="w")
+        self.padline = tk.Label(st, text="", bg=BG, fg=MUTE, font=self.font(10, False), anchor="w")
         self.padline.pack(fill="x", padx=30, pady=(2, 14))
 
-        self.kb = tk.Canvas(r, bg=BG, highlightthickness=0, width=int(U * 15.4 + 8), height=int(U * 6.4 + 8))
+        self.kb = tk.Canvas(st, bg=BG, highlightthickness=0, width=int(U * 15.4 + 8), height=int(self.REF_U * 6.4 + 8))
         self.kb.pack(padx=28, fill="x")
         r.bind("<Configure>", self.on_resize)
+        self.kb.bind("<Configure>", self.center)     # re-centre once the canvas has its new width
         self.keys = {}
         self.draw_keyboard()
 
         # inspector: what the key under the mouse (or the last key pressed) does
         self.editing = None
         self.panel_name = None
-        self.ip = tk.Canvas(r, bg=PANEL, highlightthickness=0, height=170)
+        self.ip = tk.Canvas(st, bg=PANEL, highlightthickness=0, height=300)
         self.ip.pack(fill="x", padx=28, pady=(16, 0))
         self.ip.bind("<Configure>", lambda e: self.paint_panel())
         r.bind("<Escape>", lambda e: self.stop_edit())
 
-        bottom = tk.Frame(r, bg=BG); bottom.pack(fill="x", padx=28, pady=(16, 22))
+        bottom = tk.Frame(st, bg=BG); bottom.pack(fill="x", padx=28, pady=(16, 22))
         self.bottom = bottom
-        self.cv = tk.Canvas(bottom, width=232, height=110, bg=BG, highlightthickness=0)
-        self.cv.pack(side="left")
-        self.sticks = []
-        for i, label in enumerate(("MOVE", "AIM")):
-            x0 = 4 + i * 120
-            self.cv.create_oval(x0, 4, x0 + 102, 106, outline=EDGE, width=2)
-            self.cv.create_text(x0 + 51, 55, text=label, fill=MUTE, font=(FONT, 8, "bold"))
-            dot = self.cv.create_oval(0, 0, 0, 0, fill=ACC, outline="")
-            self.sticks.append((x0 + 51, 55, dot))
-        sl = tk.Frame(bottom, bg=BG); sl.pack(side="left", fill="x", expand=True, padx=(28, 0))
+        sl = tk.Frame(bottom, bg=BG); sl.pack(side="left", fill="x", expand=True)
         a = eng.cfg["aim"]
         self.sliders = {}
         self.last_mode = None
         for i, (key, label, lo, hi, res) in enumerate((
                 ("sensitivity", "AIM SPEED", 0.2, 4.0, 0.05),
-                ("anti_deadzone", "ANTI-DEADZONE", 0.0, 0.45, 0.01),
-                ("curve", "CURVE  ·  LOWER = FINER SMALL MOVES", 0.4, 2.0, 0.05),
-                ("window_ms", "GAME FRAME MS  ·  16 = 60 FPS, 33 = 30 FPS", 4.0, 40.0, 1.0))):
+                ("anti_deadzone", "GAME DEADZONE  ·  MEASURED 0.34", 0.0, 0.45, 0.01),
+                ("curve", "CURVE  ·  1 = STRAIGHT, HIGHER = FINER SMALL MOVES", 0.4, 2.0, 0.05),
+                ("window_ms", "PS5 GAME FRAME MS  ·  16 = 60 FPS  ·  VEYRA FRAME GEN DOESN'T COUNT", 4.0, 40.0, 1.0))):
             sl.columnconfigure(i % 2, weight=1)
             w = Slider(sl, label, lo, hi, res, a[key], lambda k=key: self.set_aim(k))
             w.c.grid(row=i // 2, column=i % 2, sticky="ew", padx=(0, 26), pady=(0, 6))
@@ -985,11 +1151,13 @@ class App:
         self.inv = tk.BooleanVar(value=a["invert_y"])
         tk.Checkbutton(foot, text="Invert Y", variable=self.inv, command=lambda: self.set_aim("invert_y"),
                        bg=BG, fg=DIM, selectcolor=BG, activebackground=BG, activeforeground=FG,
-                       font=(FONT, 9)).pack(side="left")
-        reset = tk.Label(foot, text="Reset this layout", bg=BG, fg=MUTE, font=(FONT, 9), cursor="hand2")
+                       font=self.font(9, False)).pack(side="left")
+        reset = tk.Label(foot, text="Reset this layout", bg=BG, fg=MUTE, font=self.font(9, False), cursor="hand2")
         reset.pack(side="right", padx=(0, 18))
         reset.bind("<Button-1>", lambda e: self.reset_layout())
 
+        self.pads = [(top, 28, (22, 0)), (self.sub, 30, 0), (self.padline, 30, (2, 14)), (self.kb, 28, 0),
+                     (self.ip, 28, (16, 0)), (bottom, 28, (16, 22))]
         r.protocol("WM_DELETE_WINDOW", self.quit)
         self.show("foot")
         self.inspect(None)
@@ -1024,36 +1192,48 @@ class App:
 
     KB_ROWS = 6.4   # keyboard height in key units (mouse column is the tallest part)
 
+    REF_W, REF_H, REF_U = 1300, 1050, 66   # the design: window size and keyboard key size
+
     def on_resize(self, event=None):
         if event is not None and event.widget is not self.root:
             return
         if self._redraw_job:
             self.root.after_cancel(self._redraw_job)
-        self._redraw_job = self.root.after(50, self.relayout)
+        self._redraw_job = self.root.after(40, self.relayout)
 
     def relayout(self):
         self._redraw_job = None
         r = self.root
-        other = r.winfo_reqheight() - self.kb.winfo_reqheight()   # everything that is not the keyboard
-        by_w = (r.winfo_width() - 56 - 8) / 15.4
-        by_h = (r.winfo_height() - other - 8) / self.KB_ROWS
-        u = max(34.0, min(96.0, by_w, by_h))
-        if abs(u - self.u) < 1.5:
-            self.center()
+        z = max(0.4, min(r.winfo_width() / self.REF_W, r.winfo_height() / self.REF_H))
+        if abs(z - self.s) < 0.004 and self.keys:
             return
-        self.u = u
+        self.s = z
+        for (size, bold), f in self._fonts.items():
+            f.configure(size=max(4, round(size * z)))
+        self.stage.config(width=round(self.REF_W * z), height=round(self.REF_H * z))
+        for w, px, py in self.pads:
+            sc = lambda v: tuple(round(i * z) for i in v) if isinstance(v, tuple) else round(v * z)
+            w.pack_configure(padx=sc(px), pady=sc(py))
+        for b in self.tab_btns.values():
+            b.config(padx=round(16 * z), pady=round(8 * z))
+        self.ip.config(height=300 * z)
+        for sl in self.sliders.values():
+            sl.draw()
         self.redraw()
+        self.paint_panel()
 
     def redraw(self):
         self.kb.delete("all")
         self.keys = {}
-        self.kb.config(height=int(self.u * self.KB_ROWS + 8))
-        self.draw_keyboard()
+        z = self.s
+        self.kb.config(height=int((self.u * self.KB_ROWS + 8) * z))
+        self.draw_keyboard()          # drawn at design size...
+        self.kb.scale("all", 0, 0, z, z)   # ...then scaled
         self.center()
         self.prev_down = set()
         self.show(self.view, self.follow)
 
-    def center(self):
+    def center(self, event=None):
         box = self.kb.bbox("all")
         if box:
             dx = (self.kb.winfo_width() - (box[2] - box[0])) / 2 - box[0]
@@ -1061,9 +1241,12 @@ class App:
                 self.kb.move("all", dx, 0)
 
     def font(self, size, bold=True):
+        """Font at design size `size`, shown at size * scale. One object per size: when the window
+        is resized every text using it resizes with it."""
         key = (size, bold)
         if key not in self._fonts:
-            self._fonts[key] = tkfont.Font(family=FONT, size=size, weight="bold" if bold else "normal")
+            self._fonts[key] = tkfont.Font(family=FONT, size=max(4, round(size * self.s)),
+                                           weight="bold" if bold else "normal")
         return self._fonts[key]
 
     def fit(self, text, width, start):
@@ -1091,7 +1274,7 @@ class App:
         for i, n in enumerate(("Left", "Down", "Right")):
             self._key(n, ax + U * i, ay + U, U - g, U - g)
         mx, mw, mh = 4 + U * 12.75, U * 2.6, U * 0.74
-        self.kb.create_text(mx + 2, 4 + U * 0.3, text="MOUSE", fill=MUTE, font=(FONT, 8, "bold"), anchor="w")
+        self.kb.create_text(mx + 2, 4 + U * 0.3, text="MOUSE", fill=MUTE, font=self.font(8), anchor="w")
         for i, n in enumerate(MOUSE_INPUTS):
             self._key(n, mx, 4 + U * 0.62 + i * (mh + g * 0.6), mw, mh)
 
@@ -1103,16 +1286,16 @@ class App:
         bar = c.create_line(x + 10, y + h - 4, x + w - 10, y + h - 4, fill=KEY, width=3, capstyle="round")
         cap = SHORT.get(name, name)
         if row:
-            c.create_text(x + 12, y + h / 2, text=cap, fill=DIM, font=(FONT, 9), anchor="w")
-            act = c.create_text(x + w - 40, y + h / 2, text="", fill=FG, font=(FONT, 10, "bold"), anchor="e")
-            sym = c.create_text(x + w - 12, y + h / 2, text="", fill=FG, font=(FONT, 10, "bold"), anchor="e")
+            c.create_text(x + 12, y + h / 2, text=cap, fill=DIM, font=self.font(9, False), anchor="w")
+            act = c.create_text(x + w - 40, y + h / 2, text="", fill=FG, font=self.font(10), anchor="e")
+            sym = c.create_text(x + w - 12, y + h / 2, text="", fill=FG, font=self.font(10), anchor="e")
         else:
-            c.create_text(x + 8, y + 6, text=cap, fill=MUTE, font=(FONT, 7, "bold"), anchor="nw")
-            act = c.create_text(x + 8, y + h * 0.62, text="", fill=FG, font=(FONT, 9, "bold"), anchor="w")
-            sym = c.create_text(x + w - 8, y + 6, text="", fill=FG, font=(FONT, 8, "bold"), anchor="ne")
-        act2 = c.create_text(x + 8, y + h * 0.80, text="", fill=DIM, font=(FONT, 9, "bold"), anchor="w")
+            c.create_text(x + 8, y + 6, text=cap, fill=MUTE, font=self.font(7), anchor="nw")
+            act = c.create_text(x + 8, y + h * 0.62, text="", fill=FG, font=self.font(9), anchor="w")
+            sym = c.create_text(x + w - 8, y + 6, text="", fill=FG, font=self.font(8), anchor="ne")
+        act2 = c.create_text(x + 8, y + h * 0.80, text="", fill=DIM, font=self.font(9), anchor="w")
         if reserved:
-            c.create_text(x + 8, y + h / 2 + 2, anchor="w", fill=MUTE, font=(FONT, 8),
+            c.create_text(x + 8, y + h / 2 + 2, anchor="w", fill=MUTE, font=self.font(8, False),
                           text="on / off" if name == "F10" else "Alt+Tab")
         else:
             for item in (body, bar, act, act2, sym):
@@ -1131,7 +1314,7 @@ class App:
             on = m == live
             b.config(fg=BG if on else DIM, bg=(OK if self.eng.live else FG) if on else BG)
         lays = self.eng.cfg["layouts"]
-        start = max(8, min(13, int(self.u / 5.6)))
+        start = 12
         for name, k in self.keys.items():
             if k["reserved"]:
                 continue
@@ -1143,21 +1326,25 @@ class App:
             glyph = TARGETS[main[0]] if main else ("⇄" if t else "")
             if main and main[0].startswith("LS_"):
                 glyph = ""
-            x, y, x1, y1 = self.kb.bbox(k["body"])   # where the key is now (the board gets re-centred)
-            h, w = y1 - y, k["w"]
-            tx = x + (8 if h > self.u * 0.8 else 92)   # short wide mouse rows: text beside the name
+            x, y, x1, y1 = self.kb.bbox(k["body"])   # where the key is now (scaled and re-centred)
+            z = self.s
+            h, w = y1 - y, k["w"] * z
+            side = not (h > self.u * 0.8 * z or w < 200 * z)   # short wide mouse rows: text beside the name
+            tx = x + (92 if side else 8) * z
+            if side:
+                w -= 110 * z                   # ...and clear of the button badge on the right
             if sf == sd:                       # same job either way: one line
-                self.kb.coords(k["act"], tx, y + h * (0.62 if tx == x + 8 else 0.45))
-                self.kb.itemconfig(k["act"], text=sf, fill=FG if t else MUTE, font=self.fit(sf, w - 14, start))
+                self.kb.coords(k["act"], tx, y + h * (0.45 if side else 0.62))
+                self.kb.itemconfig(k["act"], text=sf, fill=FG if t else MUTE, font=self.fit(sf, w - 14 * z, start))
                 self.kb.itemconfig(k["act2"], text="")
             else:
                 small = max(7, start - 2)
                 top, bot = (sf or "–"), (sd or "–")
-                self.kb.coords(k["act"], tx, y + h * (0.47 if tx == x + 8 else 0.30))
-                self.kb.coords(k["act2"], tx, y + h * (0.74 if tx == x + 8 else 0.66))
-                self.kb.itemconfig(k["act"], text=top, font=self.fit(top, w - 14, start if live == "foot" else small),
+                self.kb.coords(k["act"], tx, y + h * (0.30 if side else 0.47))
+                self.kb.coords(k["act2"], tx, y + h * (0.66 if side else 0.74))
+                self.kb.itemconfig(k["act"], text=top, font=self.fit(top, w - 14 * z, start if live == "foot" else small),
                                    fill=(FG if tf else MUTE) if live == "foot" else DIM)
-                self.kb.itemconfig(k["act2"], text=bot, font=self.fit(bot, w - 14, start if live == "drive" else small),
+                self.kb.itemconfig(k["act2"], text=bot, font=self.fit(bot, w - 14 * z, start if live == "drive" else small),
                                    fill=(FG if td else MUTE) if live == "drive" else DIM)
             self.kb.itemconfig(k["sym"], text=glyph, fill=col)
             self.kb.itemconfig(k["bar"], fill=col if t else BG)
@@ -1179,7 +1366,7 @@ class App:
         if name is None and leaving != self.hover:
             return
         self.hover = name
-        self.inspect(name or self.last_press)
+        self.inspect(name)
 
     def inspect(self, name):
         self.panel_name = name
@@ -1188,19 +1375,22 @@ class App:
     def paint_panel(self):
         c = self.ip
         c.delete("all")
-        W = max(c.winfo_width(), 600)
+        z = self.s
+        W = max(c.winfo_width() / z, 600)       # design units
+        self.pad_items = {}
         if self.editing:
             self.paint_picker(W)
-            return
-        name = self.panel_name
-        if not name:
-            c.create_text(26, 30, text="HOVER A KEY", fill=MUTE, font=(FONT, 9, "bold"), anchor="w")
-            c.create_text(24, 82, text="What does it do?", fill=MUTE, font=(FONT, 30, "bold"), anchor="w")
-            c.create_text(26, 132, text="Point at any key to see its GTA action.  Click a key to rebind it.",
-                          fill=DIM, font=(FONT, 11), anchor="w")
-            c.config(height=170)
-            return
-        c.create_text(26, 26, text=SHORT.get(name, name).upper(), fill=DIM, font=(FONT, 9, "bold"), anchor="w")
+        elif not self.panel_name:
+            self.paint_pad(W)
+        else:
+            self.paint_text(W)
+        c.scale("all", 0, 0, z, z)
+        if self.pad_items:
+            self.update_pad()
+
+    def paint_text(self, W):
+        c, name = self.ip, self.panel_name
+        c.create_text(26, 26, text=SHORT.get(name, name).upper(), fill=DIM, font=self.font(9), anchor="w")
         half = (W - 52) / 2
         for i, (m, where) in enumerate((("foot", "ON FOOT"), ("drive", "DRIVING"))):
             t = self.eng.cfg["layouts"][m].get(name, [])
@@ -1208,13 +1398,112 @@ class App:
             on = m == self.eng.mode
             x = 26 + i * half
             c.create_text(x, 52, text=where + ("   ·   NOW" if on else ""), fill=OK if on else MUTE,
-                          font=(FONT, 9, "bold"), anchor="w")
+                          font=self.font(9), anchor="w")
             c.create_text(x - 2, 92, text=short or "Nothing", fill=(FG if on else DIM) if t else MUTE,
-                          font=self.fit(short or "Nothing", half - 30, 28), anchor="w")
-            c.create_text(x, 128, text=long, fill=DIM, font=(FONT, 10), anchor="w")
+                          font=self.fit(short or "Nothing", (half - 30) * self.s, 28), anchor="w")
+            c.create_text(x, 128, text=long, fill=DIM, font=self.font(10, False), anchor="w")
             if t:
-                c.create_text(x, 150, text=ps, fill=col, font=(FONT, 9, "bold"), anchor="w")
-        c.config(height=170)
+                c.create_text(x, 150, text=ps, fill=col, font=self.font(9), anchor="w")
+        c.config(height=300 * self.s)      # same height as the controller: hovering doesn't jump the window
+
+    # (target, shape, x, y, w, h, label side) — x from the centre, in a 640 x 250 box
+    PAD = [
+        ("L2", "rect", -215, 18, 92, 20, "w"), ("L1", "rect", -215, 44, 92, 16, "w"),
+        ("R2", "rect", 215, 18, 92, 20, "e"), ("R1", "rect", 215, 44, 92, 16, "e"),
+        ("SHARE", "pill", -120, 78, 20, 30, "n"), ("OPTIONS", "pill", 120, 78, 20, 30, "n"),
+        ("TOUCHPAD", "rect", 0, 92, 170, 64, "c"),
+        ("DUP", "rect", -205, 102, 24, 26, "w"), ("DDOWN", "rect", -205, 158, 24, 26, "w"),
+        ("DLEFT", "rect", -233, 130, 26, 24, "w"), ("DRIGHT", "rect", -177, 130, 26, 24, "e"),
+        ("TRIANGLE", "circle", 205, 100, 30, 30, "e"), ("CROSS", "circle", 205, 160, 30, 30, "e"),
+        ("SQUARE", "circle", 175, 130, 30, 30, "w"), ("CIRCLE", "circle", 235, 130, 30, 30, "e"),
+        ("L3", "circle", -105, 190, 50, 50, "s"), ("R3", "circle", 105, 190, 50, 50, "s"),
+        ("PS", "circle", 0, 185, 22, 22, "s"),
+    ]
+    GLYPH = {"CROSS": "✕", "CIRCLE": "○", "SQUARE": "□", "TRIANGLE": "△", "DUP": "▲", "DDOWN": "▼",
+             "DLEFT": "◀", "DRIGHT": "▶", "TOUCHPAD": "", "SHARE": "", "OPTIONS": "", "PS": "PS"}
+
+    def keys_for(self, target):
+        lay = self.eng.cfg["layouts"][self.eng.mode]
+        ks = [SHORT.get(k, k) for k, v in lay.items() if target in v]
+        return " / ".join(ks[:2]) + (" …" if len(ks) > 2 else "")
+
+    def paint_pad(self, W):
+        """The PS5 controller. The game says "press L3"? Find L3 here: it names your key."""
+        c = self.ip
+        H = 300
+        c.config(height=H * self.s)
+        mode = self.eng.mode
+        c.create_text(26, H - 44, text="GAME SAYS A BUTTON?", fill=DIM, font=self.font(9), anchor="w")
+        c.create_text(26, H - 26, text=("ON FOOT" if mode == "foot" else "DRIVING") + " keys shown",
+                      fill=MUTE, font=self.font(9, False), anchor="w")
+        cx, top = W / 2, 22
+        # body: two grips joined by the middle
+        body = [cx - 250, top + 64, cx - 140, top + 52, cx + 140, top + 52, cx + 250, top + 64,
+                cx + 292, top + 175, cx + 300, top + 245, cx + 250, top + 258, cx + 200, top + 220,
+                cx + 135, top + 218, cx - 135, top + 218, cx - 200, top + 220, cx - 250, top + 258,
+                cx - 300, top + 245, cx - 292, top + 175]
+        c.create_polygon(body, smooth=True, splinesteps=16, fill="#15151a", outline=EDGE, width=1)
+        f_lab, f_glyph = self.font(9), self.font(10)
+        for t, shape, x, y, w, h, side in self.PAD:
+            x0, y0 = cx + x - w / 2, top + y - h / 2
+            col = COLOR.get(t, FG)
+            if shape == "circle":
+                body_id = c.create_oval(x0, y0, x0 + w, y0 + h, fill=KEY, outline=EDGE)
+            else:
+                body_id = rrect(c, x0, y0, x0 + w, y0 + h, min(9, h / 2), fill=KEY, outline=EDGE)
+            g = self.GLYPH.get(t, t)
+            gl = c.create_text(cx + x, top + y, text=g, fill=col, font=f_glyph) if g else None
+            key = self.keys_for(t)
+            act = ACTIONS[mode].get(t, ("",))[0]
+            lab = f"{key}  ·  {act}" if key and act else (key or "")
+            lx, ly, anc = {"w": (x0 - 8, top + y, "e"), "e": (x0 + w + 8, top + y, "w"),
+                           "n": (cx + x, y0 - 8, "s"), "s": (cx + x, y0 + h + (24 if t in ("L3", "R3") else 8), "n"),
+                           "c": (cx + x, top + y, "c")}[side]
+            if t in ("L1", "L2", "R1", "R2"):
+                lx = x0 - 10 if side == "w" else x0 + w + 10
+            label = c.create_text(lx, ly, text=lab or "—", fill=FG if key else MUTE,
+                                  font=f_lab if key else self.font(8, False), anchor=anc)
+            if t in ("L1", "L2", "R1", "R2", "TOUCHPAD", "SHARE", "OPTIONS", "L3", "R3"):
+                name = {"TOUCHPAD": "touchpad", "SHARE": "create", "OPTIONS": "options"}.get(t, t)
+                c.create_text(cx + x, top + y + (0 if t != "TOUCHPAD" else -20), text=name, fill=MUTE,
+                              font=self.font(7))
+            self.pad_items[t] = (body_id, gl, label, col)
+        # left stick's four directions, around L3
+        sx, sy = cx - 105, top + 190
+        for t, dx, dy, anc in (("LS_UP", 0, -30, "s"), ("LS_DOWN", 0, 30, "n"), ("LS_LEFT", -32, 0, "e"), ("LS_RIGHT", 32, 0, "w")):
+            key = self.keys_for(t)
+            if key:
+                txt = c.create_text(sx + dx, sy + dy, text=key, fill=DIM, font=self.font(8), anchor=anc)
+                self.pad_items[t] = (None, None, txt, ACC)
+        c.create_text(cx + 105, top + 160, text="mouse", fill=MUTE, font=self.font(8), anchor="s")
+        self.pad_dots = (c.create_oval(0, 0, 0, 0, fill=ACC, outline=""), c.create_oval(0, 0, 0, 0, fill=ACC, outline=""))
+        self.pad_lit = None
+        self.pad_box = (cx, top)
+
+    def update_pad(self):
+        items = getattr(self, "pad_items", None)
+        if not items:
+            return
+        e, c, z = self.eng, self.ip, self.s
+        cx, top = self.pad_box
+        for dot, (x, y), (px, py) in zip(self.pad_dots, (e.ls, e.rs), ((cx - 105, top + 190), (cx + 105, top + 190))):
+            px, py = (px + x * 16) * z, (py - y * 16) * z
+            c.coords(dot, px - 5 * z, py - 5 * z, px + 5 * z, py + 5 * z)
+        lit = e.out
+        if lit == self.pad_lit:
+            return
+        for t, (body_id, gl, label, col) in items.items():
+            on = t in lit
+            was = self.pad_lit is not None and t in self.pad_lit
+            if self.pad_lit is not None and on == was:
+                continue
+            if body_id is not None:
+                c.itemconfig(body_id, fill=col if on else KEY)
+                if gl is not None:
+                    c.itemconfig(gl, fill=BG if on else col)
+            elif label is not None:
+                c.itemconfig(label, fill=ACC if on else DIM)
+        self.pad_lit = lit
 
     def paint_picker(self, W):
         c = self.ip
@@ -1222,13 +1511,13 @@ class App:
         cur = self.eng.cfg["layouts"][mode].get(name, [])
         where = "ON FOOT" if mode == "foot" else "DRIVING"
         c.create_text(26, 28, text=f"{SHORT.get(name, name).upper()}  DOES …", fill=FG,
-                      font=(FONT, 13, "bold"), anchor="w")
-        px = 26 + self.font(13).measure(f"{SHORT.get(name, name).upper()}  DOES …") + 18
+                      font=self.font(13), anchor="w")
+        px = 26 + self.font(13).measure(f"{SHORT.get(name, name).upper()}  DOES …") / self.s + 18
         for m, lab in (("foot", "ON FOOT"), ("drive", "WHEN DRIVING")):
             on = m == mode
-            pw = self.font(9).measure(lab) + 24
+            pw = self.font(9).measure(lab) / self.s + 24
             b = rrect(c, px, 15, px + pw, 41, 13, fill=FG if on else PANEL, outline="" if on else EDGE)
-            tx = c.create_text(px + pw / 2, 28, text=lab, fill=BG if on else DIM, font=(FONT, 9, "bold"))
+            tx = c.create_text(px + pw / 2, 28, text=lab, fill=BG if on else DIM, font=self.font(9))
             for it in (b, tx):
                 c.tag_bind(it, "<Button-1>", lambda e, m=m: self.pick_edit(m))
             px += pw + 8
@@ -1243,8 +1532,8 @@ class App:
             body = rrect(c, x, y, x + cw, y + ch, 9, fill=KEYHI if on else KEY,
                          outline=col if on else "", width=2)
             act = ACTIONS[mode].get(t, (PS_NAME[t],))[0]
-            a1 = c.create_text(x + 14, y + 18, text=act, fill=FG, font=(FONT, 11, "bold"), anchor="w")
-            a2 = c.create_text(x + 14, y + 36, text=PS_NAME[t], fill=col, font=(FONT, 8, "bold"), anchor="w")
+            a1 = c.create_text(x + 14, y + 18, text=act, fill=FG, font=self.font(11), anchor="w")
+            a2 = c.create_text(x + 14, y + 36, text=PS_NAME[t], fill=col, font=self.font(8), anchor="w")
             for it in (body, a1, a2):
                 c.tag_bind(it, "<Button-1>", lambda e, t=t: self.assign(name, t))
                 c.tag_bind(it, "<Enter>", lambda e: c.config(cursor="hand2"))
@@ -1254,7 +1543,7 @@ class App:
 
         def pill(x, label, cmd, fill, fg, anchor_right=False):
             f = self.font(10)
-            w = f.measure(label) + 32
+            w = f.measure(label) / self.s + 32
             x0 = x - w if anchor_right else x
             b = rrect(c, x0, y, x0 + w, y + 36, 18, fill=fill, outline=EDGE if fill == PANEL else "")
             tx = c.create_text(x0 + w / 2, y + 18, text=label, fill=fg, font=f)
@@ -1271,7 +1560,7 @@ class App:
                   BG if sw else DIM) + 10
         pill(x, "Clear", lambda: self.assign(name, None), PANEL, DIM)
         pill(W - 20, "Done", self.stop_edit, FG, BG, anchor_right=True)
-        c.config(height=y + 56)
+        c.config(height=max(300, y + 56) * self.s)
 
     # -- editing
     def edit(self, name, event=None):
@@ -1335,7 +1624,7 @@ class App:
         if e.live:
             self.state.config(text="LIVE", fg=OK)
             self.sub.config(text=f"Keys and mouse are driving the PS5.   {tk_} or Alt+Tab to stop.   "
-                                 + ("On foot / driving switches by itself." if e.eyes else
+                                 + ("Driving layout turns on by itself when you get in.  Caps Lock if it ever misses." if e.eyes else
                                     "F and Caps Lock switch on foot / driving."))
         elif e.armed:
             self.state.config(text="ARMED", fg=ACC)
@@ -1360,17 +1649,13 @@ class App:
         new = held - self.prev_down
         if new:
             self.last_press = sorted(new)[0]
-            if self.hover is None:
-                self.inspect(self.last_press)
         for name in held ^ self.prev_down:
             k = self.keys.get(name)
             if k and not k["reserved"]:
                 self.kb.itemconfig(k["body"], fill=KEYHI if name in held or name == self.editing
                                    else k.get("base", KEY))
         self.prev_down = held
-        for (cx, cy, dot), (x, y) in zip(self.sticks, (e.ls, e.rs)):
-            px, py = cx + x * 44, cy - y * 44
-            self.cv.coords(dot, px - 5, py - 5, px + 5, py + 5)
+        self.update_pad()
         self.root.after(33, self.refresh)
 
     def quit(self):
@@ -1395,6 +1680,8 @@ def main():
     threading.Thread(target=input_thread, args=(eng, ready), daemon=True).start()
     out = threading.Thread(target=eng.loop, daemon=True)
     out.start()
+    threading.Thread(target=eng.watch_card, daemon=True).start()
+    threading.Thread(target=eng.watch_puppet, daemon=True).start()
     if eng.cfg.get("auto_switch"):   # off: the picture-watcher guessed wrong too often (walking on a road = "driving")
         threading.Thread(target=eng.watch, daemon=True).start()
     app = App(eng)

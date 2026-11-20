@@ -25,16 +25,17 @@ on foot, one for driving. It switches between them when you get in and out of a 
 
 ## What it looks like
 
-<p align="center"><img src="docs/live.png" alt="Rewire live, on foot" width="100%"></p>
+<p align="center"><img src="docs/overview.png" alt="Rewire: both layouts on the keyboard, controller map below" width="100%"></p>
 
-**Every key says what it does.** "Jump", "Run", "Get in", not "Cross" or "L3". The colour bar and corner
-symbol show the PS button underneath, in PlayStation's own colours: blue ✕, red ○, pink □, green △. Keys
-light up as you press them, and the panel shows what the last one did.
+**Both layouts on one screen.** Every key shows what it does on foot (top line) and in a car (bottom
+line), the one you're using now in bright. "Jump", "Run", "Get in", not "Cross" or "L3". The colour bar
+and corner symbol show the PS button underneath, in PlayStation's own colours: blue ✕, red ○, pink □,
+green △.
 
-<p align="center"><img src="docs/driving.png" alt="Driving layout" width="100%"></p>
+**A controller map.** When the game says "press ○", look at the drawing under the keyboard: every PS
+button is labelled with the key that presses it, and it lights up while you hold it.
 
-**Get in a car and the whole keyboard changes.** W becomes gas, S brake, Space handbrake, H headlights.
-Get out and it switches back.
+**Scales properly.** Resize the window and the whole thing shrinks or grows together, text included.
 
 <p align="center"><img src="docs/picker.png" alt="Rebinding picker" width="100%"></p>
 
@@ -47,11 +48,16 @@ between the on-foot and driving layouts, the way F does when you enter a car.
   into the same virtual controller, rumble included. Grab the pad for a cutscene, the mouse for a shootout,
   no switching or unplugging. [HidHide](https://github.com/nefarius/HidHide) hides the real pad from other
   apps while Rewire runs, so the Remote Play app only sees one controller, and gives it back when you close Rewire.
-- **Mouse aim that feels like a mouse.** Raw mouse input turns into stick tilt, and you can tune it live
-  with an anti-deadzone, a response curve, smoothing and speed. It stops dead when your hand stops, so the
-  camera doesn't drift.
-- **Two layouts, switched automatically.** Pressing F to enter or exit a car swaps WASD from walking to
-  gas, brake and steering. Caps Lock swaps by hand.
+- **Mouse aim that feels like a mouse.** Raw mouse input turns into stick tilt, tuned against GTA 6's
+  measured stick response: its deadzone, its curve, and the camera ramp it adds even with acceleration at 0.
+  Rewire pushes through that ramp at the start of a flick, so a fast swipe turns as far as a slow one, and
+  slows down the moment your hand does. Under 2 ms of added delay.
+- **Two layouts, switched automatically.** Rewire watches the game picture for the vehicle-name card GTA
+  shows when you get in a car or on a bike, and swaps WASD from walking to gas, brake and steering. Caps
+  Lock swaps by hand (after a crash or a ragdoll out of the car).
+- **Bikes work.** S brakes and reverses, Ctrl leans back for a wheelie (W + Ctrl), X leans forward.
+- **Cursor out of the way.** While Rewire is live your cursor is hidden and locked, so it never shows
+  over the game.
 - **It never fights your PC.** Rewire only takes over while it's armed **and** your Remote Play window is
   in front. Alt+Tab away and every key goes back to normal and your cursor is freed. Alt+Tab and Alt+F4
   always work.
@@ -92,7 +98,9 @@ Remote Play.
 |---|---|
 | **F10** | Arm / disarm. Rewire goes **LIVE** once your Remote Play window is in front |
 | **Alt+Tab** | Leave. Everything is released and your cursor comes back |
-| **F / Caps Lock** | Switch between the on-foot and driving layouts |
+| **Caps Lock** | Switch between the on-foot and driving layouts by hand (it also switches by itself) |
+| **F7** | First-person trick, in the driver's seat: phone up, close it, then spam the touchpad (needs Touch Pad Button set to Camera in GTA's settings) |
+| **F8 / F9** | Aim tests for tuning: stand still and keep your hands off for ~30 s. Results go to `calib.log` |
 | **Ctrl+Alt+Del, then Esc** | Emergency: frees the cursor whatever happens |
 
 > Without HidHide, unplug your real controller while you play: most Remote Play apps only listen to one pad.
@@ -109,8 +117,9 @@ Remote Play.
 | Mouse | Look and aim · L-click shoot · R-click aim | Look · L-click drive-by |
 | Space | Jump / climb | Handbrake |
 | Shift | Run, press again to sprint | Nitrous |
-| Ctrl | Crouch | |
-| F | Get in (switches to driving) | Get out (switches to on foot) |
+| Ctrl | Crouch | Lean back (wheelie) |
+| X | | Lean forward |
+| F | Get in | Get out |
 | E | Interact | Horn |
 | Q · Tab · C · R | Cover · weapons · look back · melee | Radio · weapons · look back · melee |
 | H | | Headlights |
@@ -118,6 +127,9 @@ Remote Play.
 | Arrows | Phone · radio · objectives · detonate | Phone · blinkers · objectives |
 
 All of it can be rebound in the app. Bindings and aim settings save to `config.json`.
+
+**Best GTA 6 settings for mouse aim:** Look and Aim Acceleration 0, look and aim sensitivity at max,
+Aim Assist off. Then set Rewire's aim speed to taste.
 
 ## Notes
 

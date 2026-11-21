@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <b>Play your PS5 with a keyboard and mouse, from your PC, over Remote Play.</b><br>
+  <b>Play your PS5 or Xbox with a keyboard and mouse, from your PC, over Remote Play or cloud gaming.</b><br>
   No capture card, no adapter, no extra hardware.
 </p>
 
@@ -17,8 +17,12 @@
 
 ---
 
-Rewire turns your keyboard and mouse into a virtual PlayStation controller. Your Remote Play app picks
-it up like a normal pad and sends it to the console. You stay on your desktop the whole time.
+Rewire turns your keyboard and mouse into a virtual PlayStation or Xbox controller. Your Remote Play or
+cloud gaming app picks it up like a normal pad and sends it to the console. You stay on your desktop the
+whole time. It asks which console on first start.
+
+**Install:** download the code, double-click `install.bat`, then open Rewire from the desktop.
+**Have an AI assistant?** Point it at this repo and tell it to follow [SETUP-FOR-AI.md](SETUP-FOR-AI.md).
 
 It ships with layouts modelled on GTA V's PC controls, mapped onto GTA 6's PS5 buttons: one layout
 on foot, one for driving. It switches between them when you get in and out of a car.
@@ -27,8 +31,8 @@ on foot, one for driving. It switches between them when you get in and out of a 
 
 <p align="center"><img src="docs/overview.png" alt="Rewire: both layouts on the keyboard, controller map below" width="100%"></p>
 
-**Both layouts on one screen.** Every key shows what it does on foot (top line) and in a car (bottom
-line), the one you're using now in bright. "Jump", "Run", "Get in", not "Cross" or "L3". The colour bar
+**Plain words on every key.** Each key shows what it does in the layout you're looking at (on foot or
+driving). "Jump", "Run", "Get in", not "Cross" or "L3". The colour bar
 and corner symbol show the PS button underneath, in PlayStation's own colours: blue ✕, red ○, pink □,
 green △.
 
@@ -48,10 +52,13 @@ between the on-foot and driving layouts, the way F does when you enter a car.
   into the same virtual controller, rumble included. Grab the pad for a cutscene, the mouse for a shootout,
   no switching or unplugging. [HidHide](https://github.com/nefarius/HidHide) hides the real pad from other
   apps while Rewire runs, so the Remote Play app only sees one controller, and gives it back when you close Rewire.
-- **Mouse aim that feels like a mouse.** Raw mouse input turns into stick tilt, tuned against GTA 6's
-  measured stick response: its deadzone, its curve, and the camera ramp it adds even with acceleration at 0.
-  Rewire pushes through that ramp at the start of a flick, so a fast swipe turns as far as a slow one, and
-  slows down the moment your hand does. Under 2 ms of added delay.
+- **Mouse aim that feels like a mouse.** Raw mouse speed turns into stick tilt, glided so it's smooth,
+  and it stops the moment your hand does. Three plain sliders: mouse speed, starting push, small moves.
+  Under 2 ms of added delay. (A controller stick has a top turning speed set by the game; past it, a
+  faster swipe can't turn faster.)
+- **PlayStation or Xbox.** A virtual DualShock 4 for PS Remote Play, Veyra and Chiaki, or a virtual Xbox
+  controller for the Xbox app and xbox.com/play. The whole screen switches to that console's buttons.
+- **Special ability on V.** Both stick clicks at once, for games that put an ability there.
 - **Two layouts, switched automatically.** Rewire watches the game picture for the vehicle-name card GTA
   shows when you get in a car or on a bike, and swaps WASD from walking to gas, brake and steering. Caps
   Lock swaps by hand (after a crash or a ragdoll out of the car).
@@ -79,6 +86,8 @@ Remote Play.
 
 ## Setup
 
+The quick way: run `install.bat` (it does all of this). By hand:
+
 1. **Install [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases)**, the virtual controller driver.
    It needs one admin prompt.
 2. **Optional, to use your controller alongside keyboard + mouse:** install
@@ -100,7 +109,8 @@ Remote Play.
 | **Alt+Tab** | Leave. Everything is released and your cursor comes back |
 | **Caps Lock** | Switch between the on-foot and driving layouts by hand (it also switches by itself) |
 | **F7** | First-person trick, in the driver's seat: phone up, close it, then spam the touchpad (needs Touch Pad Button set to Camera in GTA's settings) |
-| **F8 / F9** | Aim tests for tuning: stand still and keep your hands off for ~30 s. Results go to `calib.log` |
+| **V** | Special ability (both sticks clicked) |
+| **Ctrl+F8 / Ctrl+F9** | Aim tests for tuning: stand still and keep your hands off for ~30 s. Results go to `calib.log` |
 | **Ctrl+Alt+Del, then Esc** | Emergency: frees the cursor whatever happens |
 
 > Without HidHide, unplug your real controller while you play: most Remote Play apps only listen to one pad.

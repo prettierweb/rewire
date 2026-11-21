@@ -106,6 +106,20 @@ DPAD_DIR = {(0, 1): DPAD.DS4_BUTTON_DPAD_NORTH, (1, 1): DPAD.DS4_BUTTON_DPAD_NOR
             (-1, 0): DPAD.DS4_BUTTON_DPAD_WEST, (-1, 1): DPAD.DS4_BUTTON_DPAD_NORTHWEST,
             (0, 0): DPAD.DS4_BUTTON_DPAD_NONE}
 
+XB = vg.XUSB_BUTTON
+XBTN = {"CROSS": XB.XUSB_GAMEPAD_A, "CIRCLE": XB.XUSB_GAMEPAD_B, "SQUARE": XB.XUSB_GAMEPAD_X,
+        "TRIANGLE": XB.XUSB_GAMEPAD_Y, "L1": XB.XUSB_GAMEPAD_LEFT_SHOULDER,
+        "R1": XB.XUSB_GAMEPAD_RIGHT_SHOULDER, "L3": XB.XUSB_GAMEPAD_LEFT_THUMB,
+        "R3": XB.XUSB_GAMEPAD_RIGHT_THUMB, "OPTIONS": XB.XUSB_GAMEPAD_START, "SHARE": XB.XUSB_GAMEPAD_BACK,
+        "TOUCHPAD": XB.XUSB_GAMEPAD_BACK, "PS": XB.XUSB_GAMEPAD_GUIDE,
+        "DUP": XB.XUSB_GAMEPAD_DPAD_UP, "DDOWN": XB.XUSB_GAMEPAD_DPAD_DOWN,
+        "DLEFT": XB.XUSB_GAMEPAD_DPAD_LEFT, "DRIGHT": XB.XUSB_GAMEPAD_DPAD_RIGHT}
+# the apps Rewire drives for each console (exe names, lower case)
+CONSOLE_TARGETS = {
+    "ps": ["veyra_qml_ui.exe", "chiaki.exe", "chiaki-ng.exe", "remoteplay.exe"],
+    "xbox": ["veyra_qml_ui.exe", "xboxpcapp.exe", "xbox.exe", "msedge.exe", "chrome.exe", "firefox.exe", "brave.exe"],
+}
+
 
 # ---------------------------------------------------------------- config
 def _clean_layout(lay):
@@ -133,6 +147,8 @@ def load_cfg():
             win = user.get("window")
             if isinstance(win, list) and len(win) == 4 and all(isinstance(v, int) for v in win):
                 cfg["window"] = win
+            # older configs were all PlayStation: don't ask those people again
+            cfg["console"] = user["console"] if user.get("console") in ("ps", "xbox") else "ps"
             t = user.get("targets")
             if isinstance(t, list) and t and all(isinstance(x, str) for x in t):
                 cfg["targets"] = [x.lower() for x in t]
@@ -147,6 +163,10 @@ def load_cfg():
             os.replace(CFG_PATH, CFG_PATH + ".broken")
         except OSError:
             pass
+    for m in ("foot", "drive"):          # special ability on V unless V is taken or it's bound already
+        lay = cfg["layouts"][m]
+        if "V" not in lay and not any("L3" in v and "R3" in v for v in lay.values()):
+            lay["V"] = ["L3", "R3"]
     a = cfg["aim"]
     a["ramp_ms"] = 0.0   # the turn-boost aim felt like the mouse moved on its own (11-20): always classic
     for k, v in DEFAULTS["aim"].items():
@@ -497,7 +517,8 @@ class Aim:
 class Engine:
     def __init__(self, cfg):
         self.cfg = cfg
-        self.pad = vg.VDS4Gamepad()
+        self.xbox = cfg.get("console") == "xbox"
+        self.pad = vg.VX360Gamepad() if self.xbox else vg.VDS4Gamepad()
         self.real = RealPad(self)
         self.hider = None
         real = self.real
@@ -888,6 +909,17 @@ class Engine:
             lt, rt = max(lt, real["lt"]), max(rt, real["rt"])
         p = self.pad
         p.reset()
+        if self.xbox:
+            for t in targets:
+                if t in XBTN:
+                    p.press_button(XBTN[t])
+            p.left_trigger_float(lt if lt > 0.08 else 0.0)
+            p.right_trigger_float(rt if rt > 0.08 else 0.0)
+            p.left_joystick_float(lx, ly)     # XInput: positive y = up
+            p.right_joystick_float(rx, ry)
+            p.update()
+            self.ls, self.rs = (lx, ly), (rx, ry)
+            return
         for t in targets:
             if t in BTN:
                 p.press_button(BTN[t])
@@ -985,6 +1017,67 @@ GROUP = {"L1": "#c9b8ff", "R1": "#c9b8ff", "L2": "#ffb86b", "R2": "#ffb86b", "L3
          "LS_UP": FG, "LS_DOWN": FG, "LS_LEFT": FG, "LS_RIGHT": FG, "OPTIONS": "#b8b4aa",
          "TOUCHPAD": "#b8b4aa", "SHARE": "#b8b4aa", "PS": "#b8b4aa", "MODE": "#6fa8ff"}
 COLOR = {**GROUP, **SYM}
+XBOX_LOOK = {"CROSS": ("A", "#5fd068"), "CIRCLE": ("B", "#ff5f5f"), "SQUARE": ("X", "#4fa3ff"),
+             "TRIANGLE": ("Y", "#ffd23f"), "L1": ("LB", None), "R1": ("RB", None), "L2": ("LT", None),
+             "R2": ("RT", None), "L3": ("LS", None), "R3": ("RS", None), "OPTIONS": ("☰", None),
+             "SHARE": ("⧉", None), "TOUCHPAD": ("⧉", None), "PS": ("Ⓧ", None)}
+XBOX_NAME = {"CROSS": "A", "CIRCLE": "B", "SQUARE": "X", "TRIANGLE": "Y", "L1": "LB", "R1": "RB",
+             "L2": "LT", "R2": "RT", "L3": "LS · left stick click", "R3": "RS · right stick click",
+             "OPTIONS": "Menu ☰", "SHARE": "View ⧉", "TOUCHPAD": "View ⧉", "PS": "Xbox button"}
+
+
+def apply_console(console):
+    """Swap every on-screen button name and colour to the console's own."""
+    if console != "xbox":
+        return
+    for t, (glyph, col) in XBOX_LOOK.items():
+        TARGETS[t] = glyph
+        if col:
+            SYM[t] = col
+            COLOR[t] = col
+    PS_NAME.update(XBOX_NAME)
+    App.GLYPH.update({"CROSS": "A", "CIRCLE": "B", "SQUARE": "X", "TRIANGLE": "Y", "PS": "Ⓧ",
+                      "L1": "LB", "R1": "RB", "L2": "LT", "R2": "RT", "L3": "LS", "R3": "RS"})
+    for m in ACTIONS.values():
+        m["PS"] = ("Xbox menu", "Xbox button")
+        m["SHARE"] = ("View", "View button")
+
+
+def ask_console(cfg):
+    """First start: which console? Saved, so it only asks once (change it under the sliders)."""
+    pick = []
+    r = tk.Tk()
+    r.title("Rewire")
+    r.configure(bg=BG)
+    r.resizable(False, False)
+    tk.Label(r, text="Which console are you playing on?", bg=BG, fg=FG,
+             font=(FONT, 18, "bold")).pack(padx=40, pady=(34, 6))
+    tk.Label(r, text="Rewire turns your keyboard and mouse into that console's controller.", bg=BG, fg=DIM,
+             font=(FONT, 10)).pack(padx=40, pady=(0, 22))
+    row = tk.Frame(r, bg=BG); row.pack(padx=40, pady=(0, 36))
+    for key, name, sub, col in (("ps", "PlayStation", "PS5 Remote Play  ·  Veyra  ·  Chiaki", "#4f7cff"),
+                                ("xbox", "Xbox", "Xbox app  ·  Cloud Gaming  ·  Remote Play", "#3ddc84")):
+        b = tk.Frame(row, bg=KEY, cursor="hand2", padx=28, pady=20)
+        b.pack(side="left", padx=8)
+        a = tk.Label(b, text=name, bg=KEY, fg=col, font=(FONT, 16, "bold"), cursor="hand2"); a.pack(anchor="w")
+        c = tk.Label(b, text=sub, bg=KEY, fg=DIM, font=(FONT, 9), cursor="hand2"); c.pack(anchor="w")
+        for w in (b, a, c):
+            w.bind("<Button-1>", lambda e, k=key: (pick.append(k), r.destroy()))
+            w.bind("<Enter>", lambda e, ws=(b, a, c): [x.config(bg=KEYHI) for x in ws])
+            w.bind("<Leave>", lambda e, ws=(b, a, c): [x.config(bg=KEY) for x in ws])
+    r.update_idletasks()
+    mons = monitors()
+    side = [m for m in mons if not m[1]] or mons
+    if side:
+        l, t, rr, bb = side[0][0]
+        r.geometry(f"+{l + (rr - l - r.winfo_width()) // 2}+{t + (bb - t - r.winfo_height()) // 2}")
+    r.mainloop()
+    if not pick:
+        return False
+    cfg["console"] = pick[0]
+    cfg["targets"] = sorted(set(cfg.get("targets", [])) | set(CONSOLE_TARGETS[pick[0]]))
+    save_cfg(cfg)
+    return True
 PS_NAME = {"CROSS": "✕ Cross", "CIRCLE": "○ Circle", "SQUARE": "□ Square", "TRIANGLE": "△ Triangle",
            "L1": "L1", "R1": "R1", "L2": "L2", "R2": "R2", "L3": "L3 · left stick click",
            "R3": "R3 · right stick click", "OPTIONS": "Options", "SHARE": "Create", "TOUCHPAD": "Touchpad",
@@ -1058,6 +1151,8 @@ def describe(mode, targets):
         return s, l, PS_NAME["MODE"], COLOR["MODE"]
     t = main[0]
     s, l = ACTIONS[mode].get(t, (PS_NAME[t], PS_NAME[t]))
+    if "L3" in main and "R3" in main:
+        return "Ability", "Special ability · both sticks clicked at once", "L3 + R3", COLOR.get("L3", FG)
     if "MODE" in targets:
         if t == "TRIANGLE":
             s, l = ("Get in", "Enter a vehicle · switches to the driving layout") if mode == "foot" else \
@@ -1185,6 +1280,10 @@ class App:
         tk.Checkbutton(foot, text="Invert Y", variable=self.inv, command=lambda: self.set_aim("invert_y"),
                        bg=BG, fg=DIM, selectcolor=BG, activebackground=BG, activeforeground=FG,
                        font=self.font(9, False)).pack(side="left")
+        other = "PlayStation" if eng.xbox else "Xbox"
+        sw = tk.Label(foot, text=f"Playing on {other}? Switch", bg=BG, fg=MUTE, font=self.font(9, False), cursor="hand2")
+        sw.pack(side="left", padx=(18, 0))
+        sw.bind("<Button-1>", lambda e: self.switch_console())
         reset = tk.Label(foot, text="Reset this layout", bg=BG, fg=MUTE, font=self.font(9, False), cursor="hand2")
         reset.pack(side="right", padx=(0, 18))
         reset.bind("<Button-1>", lambda e: self.reset_layout())
@@ -1462,7 +1561,7 @@ class App:
         return " / ".join(ks[:2]) + (" …" if len(ks) > 2 else "")
 
     def paint_pad(self, W):
-        """The PS5 controller. The game says "press L3"? Find L3 here: it names your key."""
+        """The console's controller. The game says "press L3"? Find L3 here: it names your key."""
         c = self.ip
         H = 300
         c.config(height=H * self.s)
@@ -1498,7 +1597,8 @@ class App:
             label = c.create_text(lx, ly, text=lab or "—", fill=FG if key else MUTE,
                                   font=f_lab if key else self.font(8, False), anchor=anc)
             if t in ("L1", "L2", "R1", "R2", "TOUCHPAD", "SHARE", "OPTIONS", "L3", "R3"):
-                name = {"TOUCHPAD": "touchpad", "SHARE": "create", "OPTIONS": "options"}.get(t, t)
+                name = ({"TOUCHPAD": "view", "SHARE": "view", "OPTIONS": "menu"} if self.eng.xbox else
+                        {"TOUCHPAD": "touchpad", "SHARE": "create", "OPTIONS": "options"}).get(t, TARGETS.get(t, t))
                 c.create_text(cx + x, top + y + (0 if t != "TOUCHPAD" else -20), text=name, fill=MUTE,
                               font=self.font(7))
             self.pad_items[t] = (body_id, gl, label, col)
@@ -1646,6 +1746,16 @@ class App:
         self.eng.cfg["layouts"][self.view] = json.loads(json.dumps(base))
         self._save_layout()
 
+    def switch_console(self):
+        """Save the other console and restart Rewire, so the right virtual controller is made."""
+        cfg = self.eng.cfg
+        cfg["console"] = "ps" if self.eng.xbox else "xbox"
+        cfg["targets"] = sorted(set(cfg.get("targets", [])) | set(CONSOLE_TARGETS[cfg["console"]]))
+        save_cfg(cfg)
+        self.quit()
+        subprocess.Popen([os.path.join(os.path.dirname(sys.executable), "pythonw.exe"), os.path.abspath(__file__)],
+                         cwd=HERE)
+
     def set_aim(self, key):
         a = self.eng.cfg["aim"]
         a[key] = bool(self.inv.get()) if key == "invert_y" else round(self.sliders[key].value, 3)
@@ -1662,7 +1772,7 @@ class App:
                                     "Caps Lock swaps between on-foot and driving keys."))
         elif e.armed:
             self.state.config(text="READY", fg=ACC)
-            self.sub.config(text="Click on the game picture in Veyra to start playing.")
+            self.sub.config(text="Click on the game window to start playing.")
         else:
             self.state.config(text="OFF", fg=MUTE)
             msg = f"Press {tk_} to turn it on."
@@ -1698,7 +1808,11 @@ class App:
 
 
 def main():
-    eng = Engine(load_cfg())
+    cfg = load_cfg()
+    if cfg.get("console") not in ("ps", "xbox") and not ask_console(cfg):
+        return
+    apply_console(cfg["console"])
+    eng = Engine(cfg)
     eng.hider = Hider()
     eng.hider.start()
     eng.real.start()

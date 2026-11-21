@@ -408,9 +408,9 @@ class Aim:
         vx = sum(e[1] for e in ev) / win
         vy = sum(e[2] for e in ev) / win
         speed = math.hypot(vx, vy)
-        if speed <= 0:
-            return 0, 0
         full = 6000.0 / max(a["sensitivity"], 0.05)
+        if speed < full * 0.03:
+            return 0, 0
         adz = min(max(a["anti_deadzone"], 0.0), 0.9)
         d = min(1.0, speed / full) ** max(a["curve"], 0.2)
         out = min(1.0, adz + (1 - adz) * d)
@@ -683,11 +683,11 @@ class Engine:
             if down and not self.macro:
                 self.start_first_person()
             return True
-        if vk == 0x77 and self.live:  # F8: swipe test (stand still, hands off, ~30 s)
+        if vk == 0x77 and self.live and u32.GetKeyState(0x11) < 0:  # F8: swipe test (stand still, hands off, ~30 s)
             if down and not self.swipe:
                 self.start_swipe()
             return True
-        if vk == 0x78 and self.live:  # F9: measure how the game turns the camera (stand still, don't touch)
+        if vk == 0x78 and self.live and u32.GetKeyState(0x11) < 0:  # F9: measure how the game turns the camera (stand still, don't touch)
             if down and not self.calib:
                 self.start_calib()
             return True
@@ -864,10 +864,13 @@ class Engine:
             targets |= real["buttons"]
             # keyboard + mouse always win; the pad's sticks only count when they're idle
             # (a resting thumb or worn stick must never fight WASD or the mouse)
-            if lx == 0 and ly == 0 and math.hypot(real["lx"], real["ly"]) > 0.15:
-                lx, ly = real["lx"], real["ly"]
-            if rx == 0 and ry == 0 and math.hypot(real["rx"], real["ry"]) > 0.15:
-                rx, ry = real["rx"], real["ry"]
+            # while keys + mouse are on, the pad's sticks are ignored entirely: a worn stick that
+            # rests off-centre made the camera "move on its own" (11-20). Off = pad works as normal.
+            if not self.live:
+                if math.hypot(real["lx"], real["ly"]) > 0.15:
+                    lx, ly = real["lx"], real["ly"]
+                if math.hypot(real["rx"], real["ry"]) > 0.15:
+                    rx, ry = real["rx"], real["ry"]
             lt, rt = max(lt, real["lt"]), max(rt, real["rt"])
         p = self.pad
         p.reset()

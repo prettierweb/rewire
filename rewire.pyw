@@ -90,7 +90,7 @@ DEFAULTS = {
     "layouts": {"foot": FOOT, "drive": DRIVE},
     # window_ms = one game frame: 16 for a 60 fps game, 33 for 30 fps
     "aim": {"sensitivity": 1.0, "anti_deadzone": 0.34, "curve": 1.0,
-            "window_ms": 16.0, "ramp_ms": 650.0, "invert_y": False},
+            "window_ms": 16.0, "ramp_ms": 0.0, "invert_y": False},
 }
 
 DS4B, DS4S, DPAD = vg.DS4_BUTTONS, vg.DS4_SPECIAL_BUTTONS, vg.DS4_DPAD_DIRECTIONS
@@ -1142,12 +1142,13 @@ class App:
                 ("sensitivity", "AIM SPEED", 0.2, 4.0, 0.05),
                 ("anti_deadzone", "GAME DEADZONE  ·  MEASURED 0.34", 0.0, 0.45, 0.01),
                 ("curve", "CURVE  ·  1 = STRAIGHT, HIGHER = FINER SMALL MOVES", 0.4, 2.0, 0.05),
-                ("window_ms", "PS5 GAME FRAME MS  ·  16 = 60 FPS  ·  VEYRA FRAME GEN DOESN'T COUNT", 4.0, 40.0, 1.0))):
+                ("window_ms", "PS5 GAME FRAME MS  ·  16 = 60 FPS  ·  VEYRA FRAME GEN DOESN'T COUNT", 4.0, 40.0, 1.0),
+                ("ramp_ms", "TURN BOOST MS  ·  0 = MOUSE MOVES THE CAMERA DIRECTLY, NO OVERSHOOT", 0.0, 800.0, 10.0))):
             sl.columnconfigure(i % 2, weight=1)
             w = Slider(sl, label, lo, hi, res, a[key], lambda k=key: self.set_aim(k))
             w.c.grid(row=i // 2, column=i % 2, sticky="ew", padx=(0, 26), pady=(0, 6))
             self.sliders[key] = w
-        foot = tk.Frame(sl, bg=BG); foot.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        foot = tk.Frame(sl, bg=BG); foot.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self.inv = tk.BooleanVar(value=a["invert_y"])
         tk.Checkbutton(foot, text="Invert Y", variable=self.inv, command=lambda: self.set_aim("invert_y"),
                        bg=BG, fg=DIM, selectcolor=BG, activebackground=BG, activeforeground=FG,

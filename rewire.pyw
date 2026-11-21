@@ -402,7 +402,20 @@ class Aim:
         self.debt_y += dy
         self.last = t
 
-    def classic(self, ev, win, a):
+    TAU = 0.028    # s: the stick glides to each new tilt instead of jumping (smooth, still quick)
+
+    def classic(self, ev, win, a, dt):
+        bx, by = self._classic(ev, win, a)
+        k = math.exp(-dt / self.TAU)
+        if bx == 0 and by == 0:
+            k = math.exp(-dt / 0.012)          # letting go stops quicker than speeding up
+        self.sx = getattr(self, "sx", 0.0) * k + bx * (1 - k)
+        self.sy = getattr(self, "sy", 0.0) * k + by * (1 - k)
+        if abs(self.sx) < 1 and abs(self.sy) < 1:
+            self.sx = self.sy = 0.0
+        return round(self.sx), round(self.sy)
+
+    def _classic(self, ev, win, a):
         """The plain mapping from the version that felt best (11-19): stick tilt = mouse speed
         over the last game frame. No tally, no catch-up: the camera stops the moment the mouse does."""
         self.debt_x = self.debt_y = self.wx = self.wy = 0.0
@@ -419,7 +432,7 @@ class Aim:
 
     def step(self, now, dt, a):
         """Returns the stick as two bytes offsets (-127..127), x right, y down (mouse sense)."""
-        win = min(max(a["window_ms"], 2.0), 60.0) / 1000.0
+        win = min(max(a["window_ms"], 24.0), 60.0) / 1000.0   # under ~24 ms the stick flickers between reports
         ramp = max(a.get("ramp_ms", 0.0), 0.0) / 1000.0
         max_lag = 0.15 if ramp else 0.05     # how far behind the camera may fall before the rest is dropped
         idle = 0.15 if ramp else 0.06        # how long it may keep catching up after the mouse stops
@@ -433,7 +446,7 @@ class Aim:
             self.debt_x = self.debt_y = self.wx = self.wy = 0.0
             return 0, 0
         if not ramp:
-            return self.classic(ev, win, a)
+            return self.classic(ev, win, a, dt)
         vx = vy = px = py = 0.0     # window speed, and counts the window still owes
         for t, dx, dy in ev:
             vx += dx; vy += dy

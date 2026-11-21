@@ -401,6 +401,21 @@ class Aim:
         self.debt_y += dy
         self.last = t
 
+    def classic(self, ev, win, a):
+        """The plain mapping from the version that felt best (11-19): stick tilt = mouse speed
+        over the last game frame. No tally, no catch-up: the camera stops the moment the mouse does."""
+        self.debt_x = self.debt_y = self.wx = self.wy = 0.0
+        vx = sum(e[1] for e in ev) / win
+        vy = sum(e[2] for e in ev) / win
+        speed = math.hypot(vx, vy)
+        if speed <= 0:
+            return 0, 0
+        full = 6000.0 / max(a["sensitivity"], 0.05)
+        adz = min(max(a["anti_deadzone"], 0.0), 0.9)
+        d = min(1.0, speed / full) ** max(a["curve"], 0.2)
+        out = min(1.0, adz + (1 - adz) * d)
+        return round(vx / speed * out * 127), round(vy / speed * out * 127)
+
     def step(self, now, dt, a):
         """Returns the stick as two bytes offsets (-127..127), x right, y down (mouse sense)."""
         win = min(max(a["window_ms"], 2.0), 60.0) / 1000.0
@@ -416,6 +431,8 @@ class Aim:
         if not ev and now - self.last > win + idle:
             self.debt_x = self.debt_y = self.wx = self.wy = 0.0
             return 0, 0
+        if not ramp:
+            return self.classic(ev, win, a)
         vx = vy = px = py = 0.0     # window speed, and counts the window still owes
         for t, dx, dy in ev:
             vx += dx; vy += dy
@@ -1143,7 +1160,7 @@ class App:
                 ("anti_deadzone", "GAME DEADZONE  ·  MEASURED 0.34", 0.0, 0.45, 0.01),
                 ("curve", "CURVE  ·  1 = STRAIGHT, HIGHER = FINER SMALL MOVES", 0.4, 2.0, 0.05),
                 ("window_ms", "PS5 GAME FRAME MS  ·  16 = 60 FPS  ·  VEYRA FRAME GEN DOESN'T COUNT", 4.0, 40.0, 1.0),
-                ("ramp_ms", "TURN BOOST MS  ·  0 = MOUSE MOVES THE CAMERA DIRECTLY, NO OVERSHOOT", 0.0, 800.0, 10.0))):
+                ("ramp_ms", "TURN BOOST MS  ·  0 = CLASSIC AIM (RECOMMENDED)", 0.0, 800.0, 10.0))):
             sl.columnconfigure(i % 2, weight=1)
             w = Slider(sl, label, lo, hi, res, a[key], lambda k=key: self.set_aim(k))
             w.c.grid(row=i // 2, column=i % 2, sticky="ew", padx=(0, 26), pady=(0, 6))

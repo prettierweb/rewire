@@ -39,7 +39,7 @@ RESERVED = {"LAlt", "F10"}   # Alt keeps Alt+Tab; F10 arms/disarms
 TARGETS = {
     "CROSS": "✕", "CIRCLE": "○", "SQUARE": "□", "TRIANGLE": "△",
     "L1": "L1", "R1": "R1", "L2": "L2", "R2": "R2", "L3": "L3", "R3": "R3",
-    "OPTIONS": "Options", "SHARE": "Create", "TOUCHPAD": "Pad", "PS": "PS",
+    "OPTIONS": "☰", "SHARE": "◫", "TOUCHPAD": "▭", "PS": "PS",
     "DUP": "D↑", "DDOWN": "D↓", "DLEFT": "D←", "DRIGHT": "D→",
     "LS_UP": "↑", "LS_DOWN": "↓", "LS_LEFT": "←", "LS_RIGHT": "→",
     "MODE": "⇄",
@@ -1090,7 +1090,7 @@ class Slider:
         w = max(c.winfo_width() - 60 * z, 10)
         f = (self.value - self.lo) / (self.hi - self.lo)
         y = 32 * z
-        c.create_text(0, 9 * z, text=self.label, fill=MUTE, font=Slider.app.font(8), anchor="w")
+        c.create_text(0, 9 * z, text=self.label, fill=DIM, font=Slider.app.fit(self.label, c.winfo_width() - 4, 9, False), anchor="w")
         c.create_line(8 * z, y, 8 * z + w, y, fill=KEY, width=max(2, 4 * z), capstyle="round")
         c.create_line(8 * z, y, 8 * z + w * f, y, fill=ACC, width=max(2, 4 * z), capstyle="round")
         x = 8 * z + w * f
@@ -1127,7 +1127,7 @@ class App:
         self.state.pack(side="left")
         right = tk.Frame(top, bg=BG); right.pack(side="right")
         self.tab_btns = {}
-        for m, label in (("foot", "ON FOOT"), ("drive", "DRIVING")):
+        for m, label in (("foot", "On foot"), ("drive", "Driving")):
             b = tk.Label(right, text=label, bg=BG, fg=DIM, font=self.font(11), padx=16, pady=8,
                          cursor="hand2")
             b.pack(side="left", padx=(6, 0))
@@ -1160,15 +1160,14 @@ class App:
         self.sliders = {}
         self.last_mode = None
         for i, (key, label, lo, hi, res) in enumerate((
-                ("sensitivity", "AIM SPEED", 0.2, 4.0, 0.05),
-                ("anti_deadzone", "GAME DEADZONE  ·  MEASURED 0.34", 0.0, 0.45, 0.01),
-                ("curve", "CURVE  ·  1 = STRAIGHT, HIGHER = FINER SMALL MOVES", 0.4, 2.0, 0.05),
-                ("window_ms", "PS5 GAME FRAME MS  ·  16 = 60 FPS  ·  VEYRA FRAME GEN DOESN'T COUNT", 4.0, 40.0, 1.0))):
-            sl.columnconfigure(i % 2, weight=1)
+                ("sensitivity", "Mouse speed  ·  how far the camera turns for a mouse move", 0.2, 12.0, 0.1),
+                ("anti_deadzone", "Starting push  ·  raise if tiny mouse moves do nothing", 0.0, 0.7, 0.01),
+                ("curve", "Small moves  ·  lower = small moves turn more", 0.3, 3.0, 0.05))):
+            sl.columnconfigure(i, weight=1, uniform="s")
             w = Slider(sl, label, lo, hi, res, a[key], lambda k=key: self.set_aim(k))
-            w.c.grid(row=i // 2, column=i % 2, sticky="ew", padx=(0, 26), pady=(0, 6))
+            w.c.grid(row=0, column=i, sticky="ew", padx=(0, 26), pady=(0, 6))
             self.sliders[key] = w
-        foot = tk.Frame(sl, bg=BG); foot.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        foot = tk.Frame(sl, bg=BG); foot.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
         self.inv = tk.BooleanVar(value=a["invert_y"])
         tk.Checkbutton(foot, text="Invert Y", variable=self.inv, command=lambda: self.set_aim("invert_y"),
                        bg=BG, fg=DIM, selectcolor=BG, activebackground=BG, activeforeground=FG,
@@ -1270,11 +1269,11 @@ class App:
                                            weight="bold" if bold else "normal")
         return self._fonts[key]
 
-    def fit(self, text, width, start):
+    def fit(self, text, width, start, bold=True):
         for size in range(start, 6, -1):
-            if self.font(size).measure(text) <= width:
-                return self.font(size)
-        return self.font(6)
+            if self.font(size, bold).measure(text) <= width:
+                return self.font(size, bold)
+        return self.font(6, bold)
 
     def draw_keyboard(self):
         U = self.u
@@ -1354,9 +1353,10 @@ class App:
             tx = x + (92 if side else 8) * z
             if side:
                 w -= 110 * z                   # ...and clear of the button badge on the right
-            if sf == sd:                       # same job either way: one line
+            if True:                           # one job per key: the layout on screen
                 self.kb.coords(k["act"], tx, y + h * (0.45 if side else 0.62))
-                self.kb.itemconfig(k["act"], text=sf, fill=FG if t else MUTE, font=self.fit(sf, w - 14 * z, start))
+                one = sf if live == "foot" else sd
+                self.kb.itemconfig(k["act"], text=one, fill=FG if t else MUTE, font=self.fit(one, w - 14 * z, start))
                 self.kb.itemconfig(k["act2"], text="")
             else:
                 small = max(7, start - 2)
@@ -1454,8 +1454,8 @@ class App:
         H = 300
         c.config(height=H * self.s)
         mode = self.eng.mode
-        c.create_text(26, H - 44, text="GAME SAYS A BUTTON?", fill=DIM, font=self.font(9), anchor="w")
-        c.create_text(26, H - 26, text=("ON FOOT" if mode == "foot" else "DRIVING") + " keys shown",
+        c.create_text(26, H - 44, text="The game shows a button? Find it here.", fill=DIM, font=self.font(9), anchor="w")
+        c.create_text(26, H - 26, text="Showing " + ("on-foot" if mode == "foot" else "driving") + " keys",
                       fill=MUTE, font=self.font(9, False), anchor="w")
         cx, top = W / 2, 22
         # body: two grips joined by the middle
@@ -1643,23 +1643,22 @@ class App:
         e = self.eng
         tk_ = e.cfg["toggle_key"]
         if e.live:
-            self.state.config(text="LIVE", fg=OK)
-            self.sub.config(text=f"Keys and mouse are driving the PS5.   {tk_} or Alt+Tab to stop.   "
-                                 + ("Driving layout turns on by itself when you get in.  Caps Lock if it ever misses." if e.eyes else
-                                    "F and Caps Lock switch on foot / driving."))
+            self.state.config(text="PLAYING", fg=OK)
+            self.sub.config(text=f"Your keys and mouse are the controller now.  {tk_} or Alt+Tab stops it.  "
+                                 + ("It switches to driving keys by itself when you get in a car (Caps Lock if it misses)." if e.eyes else
+                                    "Caps Lock swaps between on-foot and driving keys."))
         elif e.armed:
-            self.state.config(text="ARMED", fg=ACC)
-            self.sub.config(text="Click into Veyra's window to go live.")
+            self.state.config(text="READY", fg=ACC)
+            self.sub.config(text="Click on the game picture in Veyra to start playing.")
         else:
             self.state.config(text="OFF", fg=MUTE)
-            msg = f"Press {tk_} with Veyra in front to start."
+            msg = f"Press {tk_} to turn it on."
             if e.error:
                 msg = "Stopped after an error (see errors.log).   " + msg
             self.sub.config(text=msg)
         if e.real.name:
-            hid = "  ·  hidden from other apps, so Veyra uses Rewire" if e.hider and e.hider.active else \
-                "  ·  install HidHide so Veyra stops grabbing it directly"
-            self.padline.config(text=f"🎮  {e.real.name} works alongside keys + mouse{hid}", fg=SYM["TRIANGLE"])
+            self.padline.config(text=f"🎮  {e.real.name} connected: its buttons work too. Its sticks pause while keys + mouse are on.",
+                                fg=SYM["TRIANGLE"])
         else:
             self.padline.config(text="🎮  No controller plugged in. Plug one in any time and it just works.",
                                 fg=MUTE)

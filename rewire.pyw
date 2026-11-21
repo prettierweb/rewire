@@ -415,6 +415,7 @@ class Aim:
         self.ev.clear()
         self.debt_x = self.debt_y = 0.0
         self.wx = self.wy = 0.0
+        self.moving = False
 
     def feed(self, t, dx, dy):
         self.ev.append((t, dx, dy))
@@ -422,7 +423,7 @@ class Aim:
         self.debt_y += dy
         self.last = t
 
-    TAU = 0.028    # s: the stick glides to each new tilt instead of jumping (smooth, still quick)
+    TAU = 0.018    # s (was 0.028, felt draggy 11-21): the stick glides to each new tilt instead of jumping (smooth, still quick)
 
     def classic(self, ev, win, a, dt):
         bx, by = self._classic(ev, win, a)
@@ -443,8 +444,12 @@ class Aim:
         vy = sum(e[2] for e in ev) / win
         speed = math.hypot(vx, vy)
         full = 6000.0 / max(a["sensitivity"], 0.05)
-        if speed < full * 0.03:
+        # start at 3 % of full speed, but once moving keep going down to 1 %: a slow scoped-in hand sat
+        # right on one line and the stick flickered between 0 and the starting push (choppy, "snaps back")
+        if speed < full * (0.01 if getattr(self, "moving", False) else 0.03):
+            self.moving = False
             return 0, 0
+        self.moving = True
         adz = min(max(a["anti_deadzone"], 0.0), 0.9)
         d = min(1.0, speed / full) ** max(a["curve"], 0.2)
         out = min(1.0, adz + (1 - adz) * d)
@@ -550,6 +555,8 @@ class Engine:
         self.swipe = None          # F8 swipe test: [(start, end, counts/s, ramp_ms)]
         self.puppet = None         # puppet.json: inputs Claude holds until a set time
         self.macro = None          # F7 first-person trick: [(start, end, button)]     # PS buttons pressed right now (for the controller drawing)
+        self.combo_t = 0.0         # when a both-sticks key (V) went down: let go of L3/R3 first, then press both together
+        self.card_seen = []        # the last few card readings (time, yes, numbers), saved when Caps says the eyes missed
         self.wake = threading.Event()   # input arrived: send it now, don't wait for the next tick
         self.stat = [0, 0.0, 0.0, 0]    # mouse events, worst event->output delay, worst tick gap, ticks
         self.rs = self.ls = (0.0, 0.0)
@@ -602,12 +609,36 @@ class Engine:
                 continue
             try:
                 a = eyes.card_region(hwnd)
-                seen = seen + 1 if a is not None and eyes.has_card(a)[0] else 0
-            except Exception:
-                seen = 0
+                yes, why = eyes.has_card(a) if a is not None else (False, "no picture")
+                seen = seen + 1 if yes else 0
+            except Exception as e:
+                yes, why, seen = False, f"error {e}", 0
+            self.card_seen = (self.card_seen + [(time.strftime("%H:%M:%S"), self.mode, yes, why)])[-25:]
             if seen == 2 and self.mode != "drive" and time.perf_counter() >= self.eyes_hold:
                 with self.lock:
                     self.mode = "drive"
+
+    def save_miss(self, was):
+        """Caps Lock pressed while the eyes are on = they missed. Save the game picture and the last
+        5 s of card readings to misses/, so the next fix is built on real misses, not guesses."""
+        hwnd, log = self.hwnd, list(self.card_seen)
+
+        def work():
+            try:
+                import eyes
+                d = os.path.join(HERE, "misses")
+                os.makedirs(d, exist_ok=True)
+                stamp = time.strftime("%m%d_%H%M%S")
+                want = "foot" if was == "drive" else "drive"
+                base = os.path.join(d, f"{stamp}_should_be_{want}")
+                if hwnd:
+                    eyes.save_png(eyes.grab_full(hwnd), base + ".png")
+                with open(base + ".txt", "w", encoding="utf-8") as f:
+                    f.write(f"Rewire was on {was}, you switched it to {want}\n")
+                    f.writelines(f"{t} {m} card={'YES' if y else 'no'} {why}\n" for t, m, y, why in log)
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
 
     def watch(self):
         """Reads detect.py's verdicts and switches on foot / driving by itself."""
@@ -652,7 +683,11 @@ class Engine:
                 if name not in self.down:
                     self.down.add(name)
                     t = self.layout().get(name, ())
+                    if "L3" in t and "R3" in t:
+                        self.combo_t = time.perf_counter()
                     if "MODE" in t and (self.mode == "drive" or not self.eyes or len(t) == 1):
+                        if len(t) == 1 and self.eyes:
+                            self.save_miss(self.mode)   # a hand switch = the eyes got it wrong: keep the evidence
                         self.flip_mode()
                 self.wake.set()
                 return True
@@ -852,6 +887,8 @@ class Engine:
         targets = set()
         for n in active:
             targets.update(lay.get(n, ()))
+        if now - self.combo_t < 0.05:
+            targets -= {"L3", "R3"}   # V: both sticks up for a moment (Shift may be holding L3), then both down at once
         # left stick from keys, unit circle
         lx = ("LS_RIGHT" in targets) - ("LS_LEFT" in targets)
         ly = ("LS_UP" in targets) - ("LS_DOWN" in targets)

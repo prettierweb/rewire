@@ -4,3 +4,4 @@ config.json
 config.json.*
 docs/detect/
 puppet.json
+misses/

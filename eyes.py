@@ -68,3 +68,36 @@ def card_region(hwnd):
         return None
     a = np.frombuffer(buf, np.uint8).reshape(rows, w, 4)[::-1, x0:x1, 2::-1]   # flip up, BGRX -> RGB
     return a
+
+
+def grab_full(hwnd):
+    """The whole window's own picture as an RGB array (for saving a miss)."""
+    r = wt.RECT(); u32.GetClientRect(hwnd, ctypes.byref(r))
+    w, h = r.right, r.bottom
+    if w <= 0 or h <= 0:
+        return None
+    dc = u32.GetDC(hwnd); mdc = gdi.CreateCompatibleDC(dc); bmp = gdi.CreateCompatibleBitmap(dc, w, h)
+    old = gdi.SelectObject(mdc, bmp)
+    ok = u32.PrintWindow(hwnd, mdc, 3)
+    gdi.SelectObject(mdc, old)
+    hdr = (ctypes.c_uint32 * 10)(40, w, (-h) & 0xFFFFFFFF, 1 | (32 << 16), 0, 0, 0, 0, 0, 0)   # top-down
+    buf = ctypes.create_string_buffer(w * h * 4)
+    got = gdi.GetDIBits(mdc, bmp, 0, h, buf, hdr, 0)
+    gdi.DeleteObject(bmp); gdi.DeleteDC(mdc); u32.ReleaseDC(hwnd, dc)
+    if not ok or got != h:
+        return None
+    return np.frombuffer(buf, np.uint8).reshape(h, w, 4)[..., 2::-1]
+
+
+def save_png(a, path):
+    """RGB array -> .png, no Pillow needed."""
+    import struct, zlib
+    if a is None:
+        return
+    h, w, _ = a.shape
+    raw = b"".join(b"\x00" + np.ascontiguousarray(a[y]).tobytes() for y in range(h))
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(raw, 3)) + chunk(b"IEND", b""))

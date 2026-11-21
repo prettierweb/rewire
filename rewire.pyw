@@ -148,6 +148,7 @@ def load_cfg():
         except OSError:
             pass
     a = cfg["aim"]
+    a["ramp_ms"] = 0.0   # the turn-boost aim felt like the mouse moved on its own (11-20): always classic
     for k, v in DEFAULTS["aim"].items():
         try:
             a[k] = bool(a[k]) if isinstance(v, bool) else float(a[k])
@@ -1162,13 +1163,12 @@ class App:
                 ("sensitivity", "AIM SPEED", 0.2, 4.0, 0.05),
                 ("anti_deadzone", "GAME DEADZONE  ·  MEASURED 0.34", 0.0, 0.45, 0.01),
                 ("curve", "CURVE  ·  1 = STRAIGHT, HIGHER = FINER SMALL MOVES", 0.4, 2.0, 0.05),
-                ("window_ms", "PS5 GAME FRAME MS  ·  16 = 60 FPS  ·  VEYRA FRAME GEN DOESN'T COUNT", 4.0, 40.0, 1.0),
-                ("ramp_ms", "TURN BOOST MS  ·  0 = CLASSIC AIM (RECOMMENDED)", 0.0, 800.0, 10.0))):
+                ("window_ms", "PS5 GAME FRAME MS  ·  16 = 60 FPS  ·  VEYRA FRAME GEN DOESN'T COUNT", 4.0, 40.0, 1.0))):
             sl.columnconfigure(i % 2, weight=1)
             w = Slider(sl, label, lo, hi, res, a[key], lambda k=key: self.set_aim(k))
             w.c.grid(row=i // 2, column=i % 2, sticky="ew", padx=(0, 26), pady=(0, 6))
             self.sliders[key] = w
-        foot = tk.Frame(sl, bg=BG); foot.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        foot = tk.Frame(sl, bg=BG); foot.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self.inv = tk.BooleanVar(value=a["invert_y"])
         tk.Checkbutton(foot, text="Invert Y", variable=self.inv, command=lambda: self.set_aim("invert_y"),
                        bg=BG, fg=DIM, selectcolor=BG, activebackground=BG, activeforeground=FG,
